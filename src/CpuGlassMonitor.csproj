@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CpuGlassMonitor</AssemblyName>
+    <RootNamespace>CpuGlassMonitor</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <NoWarn>$(NoWarn);CA1416;WFO1000</NoWarn>
+    <Version>1.0.0</Version>
+    <Product>CpuGlassMonitor</Product>
+    <Company>CpuGlassMonitor</Company>
+    <AssemblyTitle>CPU 玻璃监控</AssemblyTitle>
+    <Description>透明毛玻璃 CPU 温度/频率/电压监控悬浮窗</Description>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <UseSystemResourceKeys>false</UseSystemResourceKeys>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="LibreHardwareMonitorLib">
+      <HintPath>$(MSBuildThisFileDirectory)lib\LibreHardwareMonitorLib.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="HidSharp">
+      <HintPath>$(MSBuildThisFileDirectory)lib\HidSharp.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="System.Management">
+      <HintPath>$(MSBuildThisFileDirectory)lib\System.Management.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="System.IO.Ports">
+      <HintPath>$(MSBuildThisFileDirectory)lib\System.IO.Ports.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\app.ico" />
+  </ItemGroup>
+
+</Project>

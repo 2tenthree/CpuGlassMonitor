@@ -1,0 +1,25 @@
+# 构建输出
+bin/
+obj/
+dist/
+publish/
+*.user
+*.suo
+.vs/
+
+# 探针/临时项目与第三方包缓存（不属于发布内容）
+probe/
+tools/*
+!tools/mkicon/
+!tools/mkicon/*.cs
+!tools/mkicon/*.csproj
+
+# 运行时产物
+*.log
+*.pdb
+*.old
+*.tmp
+
+# 系统
+Thumbs.db
+desktop.ini

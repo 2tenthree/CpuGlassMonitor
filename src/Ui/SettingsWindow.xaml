@@ -166,7 +166,7 @@
                 <Border Grid.Column="1" Background="#1AFFFFFF" Margin="0,4,0,4" />
 
                 <!-- 右：外观与行为 -->
-                <ScrollViewer Grid.Column="2" Margin="18,0,2,0" VerticalScrollBarVisibility="Auto"
+                <ScrollViewer x:Name="OptionsScroll" Grid.Column="2" Margin="18,0,2,0" VerticalScrollBarVisibility="Auto"
                               HorizontalScrollBarVisibility="Disabled">
                     <ScrollViewer.Resources>
                         <Style TargetType="ScrollBar" BasedOn="{StaticResource ThinScrollBar}" />

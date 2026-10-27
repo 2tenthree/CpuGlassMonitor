@@ -63,15 +63,19 @@ public sealed class TrayController : IDisposable
         _horizontalItem = CreateCheck("横向排列", () => App.CurrentSettings.Horizontal, v => App.CurrentSettings.Horizontal = v);
         _autoStartItem = new Forms.ToolStripMenuItem("开机自启", null, (_, _) =>
         {
-            bool target = !(App.CurrentSettings.WithWindows && AutoStart.TaskExists());
-            bool ok = target ? AutoStart.Enable(out string message) : AutoStart.Disable(out message);
-            App.CurrentSettings.WithWindows = ok && target;
+            // 目标状态取反"系统真实状态"，而不是配置文件里的标记
+            bool target = !AutoStart.IsRegistered;
+            bool ok = AutoStart.Sync(target, out string message);
+            if (!ok && target)
+            {
+                message += "\n\n提示：设置开机自启需要管理员权限。";
+            }
+
+            App.CurrentSettings.WithWindows = AutoStart.IsRegistered;
             App.NotifySettingsChanged();
+            _autoStartItem.Checked = AutoStart.IsRegistered;
             Forms.MessageBox.Show(message, "开机自启", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Information);
-        })
-        {
-            CheckOnClick = true
-        };
+        });
 
         _menu.Items.Add(_showItem);
         _menu.Items.Add(_settingsItem);
@@ -113,7 +117,7 @@ public sealed class TrayController : IDisposable
         _clickThroughItem.Checked = App.CurrentSettings.ClickThrough;
         _sparkItem.Checked = App.CurrentSettings.ShowSparkline;
         _horizontalItem.Checked = App.CurrentSettings.Horizontal;
-        _autoStartItem.Checked = App.CurrentSettings.WithWindows;
+        _autoStartItem.Checked = AutoStart.IsRegistered;
     }
 
     private Icon LoadIcon()

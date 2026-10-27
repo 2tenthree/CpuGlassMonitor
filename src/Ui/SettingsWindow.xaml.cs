@@ -157,7 +157,8 @@ public partial class SettingsWindow : Window
         ChkTopmost.IsChecked = _settings.AlwaysOnTop;
         ChkLock.IsChecked = _settings.Locked;
         ChkClickThrough.IsChecked = _settings.ClickThrough;
-        ChkAutoStart.IsChecked = _settings.WithWindows || AutoStart.TaskExists();
+        // 以实际注册情况为准：任务/Run 键还在就显示为勾选
+        ChkAutoStart.IsChecked = AutoStart.IsRegistered;
         ChkElevate.IsChecked = _settings.AskElevation;
         ChkShowAll.IsChecked = _settings.ShowAllSensors;
 
@@ -205,6 +206,7 @@ public partial class SettingsWindow : Window
         s.AlwaysOnTop = ChkTopmost.IsChecked == true;
         s.Locked = ChkLock.IsChecked == true;
         s.ClickThrough = ChkClickThrough.IsChecked == true;
+        s.WithWindows = ChkAutoStart.IsChecked == true;
         s.AskElevation = ChkElevate.IsChecked == true;
         s.ShowAllSensors = ChkShowAll.IsChecked == true;
         s.Accent = _accent;
@@ -328,6 +330,7 @@ public partial class SettingsWindow : Window
         ChkTopmost.IsChecked = defaults.AlwaysOnTop;
         ChkLock.IsChecked = defaults.Locked;
         ChkClickThrough.IsChecked = defaults.ClickThrough;
+        ChkAutoStart.IsChecked = AutoStart.IsRegistered;
         ChkElevate.IsChecked = defaults.AskElevation;
         ChkShowAll.IsChecked = false;
 
@@ -340,9 +343,31 @@ public partial class SettingsWindow : Window
         UpdateSliderTexts();
     }
 
+    /// <summary>把右侧选项区滚到底（仅供截图/自动化验证使用）。</summary>
+    public void ScrollOptionsToEnd()
+    {
+        OptionsScroll.ScrollToEnd();
+    }
+
     private void Save_Click(object sender, RoutedEventArgs e)
     {
-        Result = BuildSettings();
+        AppSettings built = BuildSettings();
+
+        // 开机自启是系统级状态，不能只写配置文件：按实际注册情况对齐一次
+        bool want = built.WithWindows;
+        if (want != AutoStart.IsRegistered)
+        {
+            if (!AutoStart.Sync(want, out string message))
+            {
+                MessageBox.Show(this, message, "开机自启", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        // 以系统真实状态回写，避免"取消勾选后重开又变成勾上"
+        built.WithWindows = AutoStart.IsRegistered;
+        ChkAutoStart.IsChecked = built.WithWindows;
+
+        Result = built;
         DialogResult = true;
         Close();
     }

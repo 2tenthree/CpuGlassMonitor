@@ -61,6 +61,12 @@ public partial class App : Application
             return;
         }
 
+        if (e.Args.Any(a => a.Equals("--autostart-test", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunAutoStartTest();
+            return;
+        }
+
         // 单实例检测：不能用「createdNew」判断。上一个实例被强杀（或调试用例）后，
         // 内核对象可能仍被别人打开着，createdNew 会一直是 false，导致「明明没有实例在跑」
         // 却一直提示"已有实例在运行"。这里改为争抢所有权：WaitOne(0) 成功才算拿到。
@@ -124,6 +130,9 @@ public partial class App : Application
 
         Tray = new TrayController(Shell, Settings);
 
+        // 自启状态与传感器无关，先校准，别被后面的驱动初始化卡住
+        ReconcileAutoStart();
+
         int shotIndex = Array.FindIndex(e.Args, a => a.Equals("--shot", StringComparison.OrdinalIgnoreCase));
         int shotSettingsIndex = Array.FindIndex(e.Args, a => a.Equals("--shot-settings", StringComparison.OrdinalIgnoreCase));
         int shotMenuIndex = Array.FindIndex(e.Args, a => a.Equals("--shot-menu", StringComparison.OrdinalIgnoreCase));
@@ -166,6 +175,47 @@ public partial class App : Application
         }));
     }
 
+    /// <summary>
+    /// 启动后对照一次"开机自启"的真实状态：注册项被手动删掉、或上次设置只写了配置文件没落地时，
+    /// 把 settings.json 里的标记纠正过来，避免托盘/设置面板显示成勾选却取消不掉。
+    /// </summary>
+    private void ReconcileAutoStart()
+    {
+        Task.Run(() =>
+        {
+            bool registered;
+            try
+            {
+                registered = AutoStart.IsRegistered;
+            }
+            catch (Exception ex)
+            {
+                SettingsStore.Log("开机自启状态读取失败: " + ex.Message);
+                return;
+            }
+
+            // schtasks 查询在后台线程做，结果回到 UI 线程再动配置与界面
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    if (Settings.WithWindows != registered)
+                    {
+                        Settings.WithWindows = registered;
+                        SettingsStore.Save(Settings);
+                        SettingsStore.Log($"开机自启：配置与系统状态不一致，已纠正为 {registered}");
+                    }
+
+                    Tray?.SyncState();
+                }
+                catch (Exception ex)
+                {
+                    SettingsStore.Log("开机自启状态校准失败: " + ex.Message);
+                }
+            }));
+        });
+    }
+
     private enum CaptureMode
     {
         Main,
@@ -192,9 +242,14 @@ public partial class App : Application
                         inner.Stop();
                         try
                         {
+                            if (Environment.GetCommandLineArgs().Any(a => a.Equals("--scroll-end", StringComparison.OrdinalIgnoreCase)))
+                            {
+                                window.ScrollOptionsToEnd();
+                                window.UpdateLayout();
+                            }
+
                             CaptureVisual(window, path, "settings");
-                        }
-                        catch (Exception ex)
+                        }                        catch (Exception ex)
                         {
                             SettingsStore.Log("设置面板截图失败: " + ex);
                         }
@@ -324,6 +379,37 @@ public partial class App : Application
         }
 
         foreach (string line in lines) SettingsStore.Log("[selftest] " + line);
+        Shutdown(0);
+    }
+
+    /// <summary>无界面自检：开机自启的开关/取消是否真的落到系统上（用于自动化验证）。</summary>
+    private void RunAutoStartTest()
+    {
+        var lines = new List<string>();
+        try
+        {
+            lines.Add("initial=" + AutoStart.IsRegistered);
+            bool ok1 = AutoStart.Sync(true, out string m1);
+            lines.Add($"enable ok={ok1} registered={AutoStart.IsRegistered} msg={m1}");
+
+            bool ok2 = AutoStart.Sync(false, out string m2);
+            lines.Add($"disable ok={ok2} registered={AutoStart.IsRegistered} msg={m2}");
+
+            bool ok3 = AutoStart.Sync(false, out string m3);
+            lines.Add($"disable-again ok={ok3} registered={AutoStart.IsRegistered} msg={m3}");
+
+            bool ok4 = AutoStart.Sync(true, out string m4);
+            lines.Add($"enable-again ok={ok4} registered={AutoStart.IsRegistered} msg={m4}");
+
+            bool ok5 = AutoStart.Sync(false, out string m5);
+            lines.Add($"final-disable ok={ok5} registered={AutoStart.IsRegistered} msg={m5}");
+        }
+        catch (Exception ex)
+        {
+            lines.Add("AUTOSTART TEST EXCEPTION: " + ex);
+        }
+
+        foreach (string line in lines) SettingsStore.Log("[autostart-test] " + line);
         Shutdown(0);
     }
 

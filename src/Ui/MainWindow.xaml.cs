@@ -560,12 +560,18 @@ public partial class MainWindow : Window
     private void MenuAutoStart_Click(object sender, RoutedEventArgs e)
     {
         AppSettings settings = ((App)Application.Current).Settings;
-        bool target = MenuAutoStart.IsChecked;
-        string message;
-        bool ok = target ? AutoStart.Enable(out message) : AutoStart.Disable(out message);
-        settings.WithWindows = ok && target;
+        // 目标状态取反"系统真实状态"
+        bool target = !AutoStart.IsRegistered;
+        bool ok = AutoStart.Sync(target, out string message);
+        settings.WithWindows = AutoStart.IsRegistered;
         ((App)Application.Current).ApplySettings(settings);
-        MenuAutoStart.IsChecked = settings.WithWindows;
+        MenuAutoStart.IsChecked = AutoStart.IsRegistered;
+
+        if (!ok && target)
+        {
+            message += "\n\n提示：设置开机自启需要管理员权限。";
+        }
+
         MessageBox.Show(this, message, "开机自启", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 

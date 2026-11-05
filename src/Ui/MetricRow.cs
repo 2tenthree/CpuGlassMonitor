@@ -22,7 +22,9 @@ public sealed class MetricRow : INotifyPropertyChanged
         PrimaryBrush = primary;
         WarnBrush = warn;
         CritBrush = crit;
+        IconBrush = GroupPalette.For(spec.Group);
     }
+
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -33,6 +35,18 @@ public sealed class MetricRow : INotifyPropertyChanged
     public string Label => Spec.Label;
 
     public string Unit => Spec.Unit;
+
+    /// <summary>代替文字标签的图标字形。</summary>
+    public string Icon => Spec.Icon;
+
+    /// <summary>按分组着色的图标笔刷（CPU 青、显卡绿、内存琥珀、网络紫）。</summary>
+    public Brush IconBrush { get; }
+
+    /// <summary>鼠标悬停时显示完整名称（图标化以后靠它认指标）。</summary>
+    public string Tooltip =>
+        string.IsNullOrEmpty(Spec.Unit)
+            ? $"{Spec.Label} · {Spec.SubGroup}"
+            : $"{Spec.Label} · {Spec.SubGroup} · {Spec.Unit}";
 
     public Brush PrimaryBrush { get; }
 

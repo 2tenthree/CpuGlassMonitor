@@ -42,6 +42,7 @@ public sealed class MetricOption : INotifyPropertyChanged
 
         bool aggregate = spec.Key.StartsWith("agg.", StringComparison.Ordinal);
         Order = groupRank * 1_000_000 + subRank * 10_000 + (aggregate ? 0 : 5_000) + insertionIndex;
+        IconBrush = GroupPalette.For(spec.Group);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -53,6 +54,12 @@ public sealed class MetricOption : INotifyPropertyChanged
     public string Label { get; }
 
     public string Detail { get; }
+
+    /// <summary>与面板一致的图标字形。</summary>
+    public string Icon => Spec.Icon;
+
+    /// <summary>与面板一致的图标颜色。</summary>
+    public System.Windows.Media.Brush IconBrush { get; private set; } = System.Windows.Media.Brushes.Gray;
 
     public string GroupTitle { get; }
 

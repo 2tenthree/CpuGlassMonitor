@@ -136,11 +136,17 @@
                                 <Grid>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
                                     <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                               Style="{StaticResource GlassCheckBox}" VerticalAlignment="Center" />
-                                    <StackPanel Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock Grid.Column="1" Text="{Binding Icon}"
+                                               FontFamily="{DynamicResource IconFont}" FontSize="12.5"
+                                               Foreground="{Binding IconBrush}"
+                                               Width="18" TextAlignment="Center"
+                                               VerticalAlignment="Center" Margin="8,0,0,0" />
+                                    <StackPanel Grid.Column="2" Margin="6,0,0,0" VerticalAlignment="Center">
                                         <TextBlock Text="{Binding Label}" FontSize="12.2"
                                                    Foreground="{DynamicResource TextPrimaryBrush}"
                                                    TextTrimming="CharacterEllipsis" />

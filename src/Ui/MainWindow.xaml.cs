@@ -184,11 +184,11 @@ public partial class MainWindow : Window
         else
         {
             SizeToContent = SizeToContent.Height;
-            MinWidth = 236;
+            MinWidth = 148;
             MaxWidth = 640;
-            CardInner.Margin = new Thickness(15, 11, 14, 12);
+            CardInner.Margin = new Thickness(13, 11, 12, 12);
             HintText.MaxWidth = double.PositiveInfinity;
-            if (_settings.WindowWidth >= 236 && _settings.WindowWidth <= 640)
+            if (_settings.WindowWidth >= 148 && _settings.WindowWidth <= 640)
             {
                 Width = _settings.WindowWidth;
             }
@@ -221,7 +221,9 @@ public partial class MainWindow : Window
         Resources["UnitSize"] = 9.5 * s;
         Resources["FooterSize"] = 9.5 * s;
         Resources["RowHeight"] = 22.0 * s;
-        Resources["ValueColumnWidth"] = new GridLength(48.0 * s);
+        Resources["IconSize"] = 13.0 * s;
+        Resources["IconColumnWidth"] = 17.0 * s;
+        Resources["ValueColumnWidth"] = new GridLength(40.0 * s);
         Resources["UnitColumnWidth"] = new GridLength(24.0 * s);
         Resources["SparkWidth"] = _settings.ShowSparkline ? 46.0 * s : 0.0;
         Resources["SparkWidthH"] = _settings.ShowSparkline ? 30.0 * s : 0.0;

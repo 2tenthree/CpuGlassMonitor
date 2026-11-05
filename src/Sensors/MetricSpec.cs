@@ -16,6 +16,32 @@ public sealed class MetricSpec
 
     public string Unit { get; init; } = "";
 
+    /// <summary>面板上代替文字标签显示的图标字形（Segoe Fluent Icons / Segoe MDL2 Assets）。</summary>
+    public string Icon => IconFor(Key, SubGroup);
+
+    private static string IconFor(string key, string subGroup)
+    {
+        if (key == "agg.net.down") return Icons.Download;
+        if (key == "agg.net.up") return Icons.Upload;
+
+        return subGroup switch
+        {
+            "温度" => Icons.Temperature,
+            "频率" => Icons.Clock,
+            "负载" => Icons.Load,
+            "占用" => Icons.Load,
+            "功耗" => Icons.Power,
+            "能耗" => Icons.Power,
+            "电压" => Icons.Voltage,
+            "风扇" => Icons.Fan,
+            "容量" => Icons.Capacity,
+            "数据" => Icons.Capacity,
+            "带宽" => Icons.Throughput,
+            "速度" => Icons.Throughput,
+            _ => Icons.Default
+        };
+    }
+
     public double Scale { get; init; } = 1.0;
 
     public int Digits { get; init; }

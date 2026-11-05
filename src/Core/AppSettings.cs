@@ -19,6 +19,9 @@ public sealed class AppSettings
     /// </summary>
     public bool NetDefaultsApplied { get; set; }
 
+    /// <summary>1.2 图标化标签后收窄过窗口宽度（只做一次）。</summary>
+    public bool IconsApplied { get; set; }
+
     /// <summary>亚克力底色浓度 0..1（越大越不透明）。</summary>
     public double TintStrength { get; set; } = 0.55;
 
@@ -63,7 +66,7 @@ public sealed class AppSettings
 
     public double? WindowTop { get; set; }
 
-    public double WindowWidth { get; set; } = 300;
+    public double WindowWidth { get; set; } = 180;
 
     public bool WithWindows { get; set; }
 

@@ -182,6 +182,15 @@ public partial class App : Application
                     SettingsStore.Save(Settings);
                     if (added) Shell?.ApplySettings(Settings);
                 }
+
+                if (!Settings.IconsApplied)
+                {
+                    // 1.2 用图标代替文字标签，面板可以窄很多：把老配置里偏宽的宽度收一次
+                    if (Settings.WindowWidth > 200) Settings.WindowWidth = 180;
+                    Settings.IconsApplied = true;
+                    SettingsStore.Save(Settings);
+                    Shell?.ApplySettings(Settings);
+                }
             }
             catch (Exception ex)
             {

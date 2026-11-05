@@ -19,11 +19,13 @@
 
     <Window.Resources>
         <sys:Double x:Key="LabelSize">11.5</sys:Double>
+        <sys:Double x:Key="IconSize">13</sys:Double>
+        <sys:Double x:Key="IconColumnWidth">17</sys:Double>
         <sys:Double x:Key="ValueSize">16</sys:Double>
         <sys:Double x:Key="UnitSize">9.5</sys:Double>
         <sys:Double x:Key="FooterSize">9.5</sys:Double>
         <sys:Double x:Key="RowHeight">22</sys:Double>
-        <GridLength x:Key="ValueColumnWidth">48</GridLength>
+        <GridLength x:Key="ValueColumnWidth">40</GridLength>
         <GridLength x:Key="UnitColumnWidth">24</GridLength>
         <sys:Double x:Key="SparkWidth">46</sys:Double>
         <sys:Double x:Key="SparkWidthH">30</sys:Double>
@@ -31,19 +33,22 @@
         <BooleanToVisibilityConverter x:Key="BoolToVis" />
 
         <DataTemplate x:Key="MetricRowTemplate" DataType="{x:Type ui:MetricRow}">
-            <Grid Height="{DynamicResource RowHeight}">
+            <Grid Height="{DynamicResource RowHeight}" ToolTip="{Binding Tooltip}">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="{DynamicResource ValueColumnWidth}" />
                     <ColumnDefinition Width="{DynamicResource UnitColumnWidth}" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
-                <TextBlock Text="{Binding Label}"
-                           FontSize="{DynamicResource LabelSize}"
-                           Foreground="{DynamicResource TextSecondaryBrush}"
-                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                           Margin="0,0,10,0" />
+                <!-- 图标代替文字标签：省横向空间 -->
+                <TextBlock Text="{Binding Icon}"
+                           FontFamily="{DynamicResource IconFont}"
+                           FontSize="{DynamicResource IconSize}"
+                           Foreground="{Binding IconBrush}"
+                           VerticalAlignment="Center" HorizontalAlignment="Center"
+                           Width="{DynamicResource IconColumnWidth}" />
 
                 <TextBlock Grid.Column="1"
                            Text="{Binding ValueText}"
@@ -72,13 +77,15 @@
             </Grid>
         </DataTemplate>
 
-        <!-- 横向排列用的紧凑模板：标签 值 单位 挤在一行 -->
+        <!-- 横向排列用的紧凑模板：图标 值 单位 挤在一行 -->
         <DataTemplate x:Key="MetricRowTemplateH" DataType="{x:Type ui:MetricRow}">
-            <StackPanel Orientation="Horizontal" Height="{DynamicResource RowHeight}" Margin="0,0,14,0">
-                <TextBlock Text="{Binding Label}"
-                           FontSize="{DynamicResource LabelSize}"
-                           Foreground="{DynamicResource TextSecondaryBrush}"
-                           VerticalAlignment="Center" Margin="0,0,6,1" />
+            <StackPanel Orientation="Horizontal" Height="{DynamicResource RowHeight}" Margin="0,0,12,0"
+                        ToolTip="{Binding Tooltip}">
+                <TextBlock Text="{Binding Icon}"
+                           FontFamily="{DynamicResource IconFont}"
+                           FontSize="{DynamicResource IconSize}"
+                           Foreground="{Binding IconBrush}"
+                           VerticalAlignment="Center" Margin="0,0,5,0" />
                 <TextBlock Text="{Binding ValueText}"
                            FontFamily="{DynamicResource NumFont}"
                            FontSize="{DynamicResource ValueSize}"

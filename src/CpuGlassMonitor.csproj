@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -17,11 +17,11 @@
     <SelfContained>false</SelfContained>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <NoWarn>$(NoWarn);CA1416;WFO1000</NoWarn>
-    <Version>1.0.1</Version>
+    <Version>1.1.0</Version>
     <Product>CpuGlassMonitor</Product>
     <Company>CpuGlassMonitor</Company>
     <AssemblyTitle>CPU 玻璃监控</AssemblyTitle>
-    <Description>透明毛玻璃 CPU 温度/频率/电压监控悬浮窗</Description>
+    <Description>透明毛玻璃 CPU 温度/频率/电压/网速监控悬浮窗</Description>
     <InvariantGlobalization>false</InvariantGlobalization>
     <UseSystemResourceKeys>false</UseSystemResourceKeys>
   </PropertyGroup>

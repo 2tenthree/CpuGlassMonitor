@@ -161,8 +161,26 @@ public partial class App : Application
                         .Select(s => s.Key)
                         .ToList();
                     Settings.DefaultsApplied = true;
+                    Settings.NetDefaultsApplied = true;
                     SettingsStore.Save(Settings);
                     Shell?.ApplySettings(Settings);
+                }
+                else if (!Settings.NetDefaultsApplied)
+                {
+                    // 1.1 新增网速指标：老配置里没有，默认补上（只补一次）
+                    bool added = false;
+                    foreach (string key in new[] { AggKeys.NetDown, AggKeys.NetUp })
+                    {
+                        if (Engine.Catalog.ContainsKey(key) && !Settings.SelectedKeys.Contains(key))
+                        {
+                            Settings.SelectedKeys.Add(key);
+                            added = true;
+                        }
+                    }
+
+                    Settings.NetDefaultsApplied = true;
+                    SettingsStore.Save(Settings);
+                    if (added) Shell?.ApplySettings(Settings);
                 }
             }
             catch (Exception ex)
@@ -245,6 +263,12 @@ public partial class App : Application
                             if (Environment.GetCommandLineArgs().Any(a => a.Equals("--scroll-end", StringComparison.OrdinalIgnoreCase)))
                             {
                                 window.ScrollOptionsToEnd();
+                                window.UpdateLayout();
+                            }
+
+                            if (Environment.GetCommandLineArgs().Any(a => a.Equals("--scroll-list", StringComparison.OrdinalIgnoreCase)))
+                            {
+                                window.ScrollListToEnd();
                                 window.UpdateLayout();
                             }
 

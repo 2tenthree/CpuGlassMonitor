@@ -349,6 +349,15 @@ public partial class SettingsWindow : Window
         OptionsScroll.ScrollToEnd();
     }
 
+    /// <summary>把左侧指标列表滚到底（仅供截图/自动化验证使用）。</summary>
+    public void ScrollListToEnd()
+    {
+        if (_view is null) return;
+
+        object? last = _view.Cast<object>().LastOrDefault();
+        if (last != null) MetricListBox.ScrollIntoView(last);
+    }
+
     private void Save_Click(object sender, RoutedEventArgs e)
     {
         AppSettings built = BuildSettings();

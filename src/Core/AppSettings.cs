@@ -13,6 +13,12 @@ public sealed class AppSettings
     /// <summary>是否已经写入过默认指标（首次启动后置为 true，避免覆盖用户选择）。</summary>
     public bool DefaultsApplied { get; set; }
 
+    /// <summary>
+    /// 是否已经把「网速」指标补进老配置（1.1 新增）。只补一次，
+    /// 之后用户在设置里取消勾选也不会再被强行加回来。
+    /// </summary>
+    public bool NetDefaultsApplied { get; set; }
+
     /// <summary>亚克力底色浓度 0..1（越大越不透明）。</summary>
     public double TintStrength { get; set; } = 0.55;
 

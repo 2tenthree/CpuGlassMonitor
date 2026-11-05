@@ -23,6 +23,9 @@ public static class AggKeys
     public const string RamLoad = "agg.ram.load";
     public const string RamUsed = "agg.ram.used";
     public const string RamFree = "agg.ram.free";
+
+    public const string NetDown = "agg.net.down";
+    public const string NetUp = "agg.net.up";
 }
 
 /// <summary>一次采样的结果。</summary>
@@ -45,6 +48,7 @@ public sealed class SensorEngine : IDisposable
     private readonly Dictionary<string, (IHardware Hardware, ISensor Sensor)> _rawSensors = new(StringComparer.Ordinal);
     private readonly Dictionary<string, MetricSpec> _catalog = new(StringComparer.Ordinal);
     private readonly List<(string Key, Func<SensorReading, double?> Compute)> _aggregates = new();
+    private readonly NetworkSampler _network = new();
 
     private Computer? _computer;
     private Thread? _worker;
@@ -209,6 +213,11 @@ public sealed class SensorEngine : IDisposable
             if (v.HasValue && !double.IsNaN(v.Value)) reading.Values[key] = v.Value;
         }
 
+        // 网速：由程序自己按累计字节差值算，和 LHM 无关（LHM 在 Windows 上没有网络吞吐）
+        _network.Sample();
+        reading.Values[AggKeys.NetDown] = _network.DownBytesPerSecond;
+        reading.Values[AggKeys.NetUp] = _network.UpBytesPerSecond;
+
         // 温度不是一上电就能读到：ring0 驱动装好后第一次 Update 往往还是 null。
         // 所以这个标记必须是「只要读到过一次就为真」，否则 UI 会一直停在"需要管理员权限"。
         if (!CpuTemperatureAvailable &&
@@ -287,6 +296,7 @@ public sealed class SensorEngine : IDisposable
         BuildCpuAggregates(cpu);
         BuildGpuAggregates(gpu);
         BuildRamAggregates();
+        BuildNetworkAggregates();
 
         CpuTemperatureAvailable =
             first.Get(AggKeys.CpuTempMax).HasValue || first.Get(AggKeys.CpuTempAvg).HasValue;
@@ -653,8 +663,39 @@ public sealed class SensorEngine : IDisposable
         }
     }
 
-    private List<(string Key, ISensor Sensor)> Find(IHardware hw, SensorType type)
+    /// <summary>网络上下行速度：值以「字节/秒」存，显示时换算成 MB/s。</summary>
+    private void BuildNetworkAggregates()
     {
+        const double BytesToMegabytes = 1.0 / (1024 * 1024);
+
+        AddAggregate(new MetricSpec
+        {
+            Key = AggKeys.NetDown,
+            Group = "网络",
+            SubGroup = "速度",
+            Label = "下载速度",
+            Unit = "MB/s",
+            Scale = BytesToMegabytes,
+            Digits = 2,
+            DefaultOn = true,
+            SparkMin = 0
+        }, r => r.Get(AggKeys.NetDown));
+
+        AddAggregate(new MetricSpec
+        {
+            Key = AggKeys.NetUp,
+            Group = "网络",
+            SubGroup = "速度",
+            Label = "上传速度",
+            Unit = "MB/s",
+            Scale = BytesToMegabytes,
+            Digits = 2,
+            DefaultOn = true,
+            SparkMin = 0
+        }, r => r.Get(AggKeys.NetUp));
+    }
+
+    private List<(string Key, ISensor Sensor)> Find(IHardware hw, SensorType type)    {
         var list = new List<(string Key, ISensor Sensor)>();
         foreach (ISensor sensor in hw.Sensors)
         {

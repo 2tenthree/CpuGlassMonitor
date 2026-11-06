@@ -11,7 +11,15 @@ public static class SettingsStore
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
-    public static string Directory { get; } = ResolveDirectory();
+    private static string? _directory;
+
+    public static string Directory => _directory ??= ResolveDirectory();
+
+    /// <summary>调试用（--config &lt;目录&gt;）：把配置目录改到指定位置，便于提权实例也能用测试配置。</summary>
+    public static void OverrideDirectory(string directory)
+    {
+        if (!string.IsNullOrWhiteSpace(directory)) _directory = directory;
+    }
 
     private static string ResolveDirectory()
     {
@@ -20,9 +28,9 @@ public static class SettingsStore
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CpuGlassMonitor");
     }
 
-    public static string FilePath { get; } = Path.Combine(Directory, "settings.json");
+    public static string FilePath => Path.Combine(Directory, "settings.json");
 
-    public static string LogPath { get; } = Path.Combine(Directory, "app.log");
+    public static string LogPath => Path.Combine(Directory, "app.log");
 
     public static AppSettings Load()
     {

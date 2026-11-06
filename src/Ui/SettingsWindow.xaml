@@ -232,6 +232,8 @@
                         <CheckBox x:Name="ChkLock" Content="锁定位置（禁止拖动）" Style="{StaticResource SettingCheckBox}" />
                         <CheckBox x:Name="ChkClickThrough" Content="鼠标穿透（点击不拦截鼠标）" Style="{StaticResource SettingCheckBox}" />
                         <CheckBox x:Name="ChkAutoStart" Content="开机自启（计划任务，登录不弹 UAC）" Style="{StaticResource SettingCheckBox}" />
+                        <TextBlock x:Name="AutoStartHint" Visibility="Collapsed" TextWrapping="Wrap" FontSize="10.5"
+                                   Foreground="{DynamicResource WarnBrush}" Margin="0,2,0,2" />
                         <CheckBox x:Name="ChkElevate" Content="启动时请求管理员权限（读取 CPU 温度/频率/电压）"
                                   Style="{StaticResource SettingCheckBox}" />
 

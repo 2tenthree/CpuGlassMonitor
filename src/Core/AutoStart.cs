@@ -21,7 +21,7 @@ public static class AutoStart
     public static bool IsEnabled => File.Exists(Environment.ProcessPath ?? "") && IsRegistered;
 
     /// <summary>把开机自启对齐到期望状态；返回是否成功，message 可直接展示给用户。</summary>
-    public static bool Sync(bool enabled, out string message)
+    public static bool Sync(bool enabled, out string message, bool allowElevationPrompt = true)
     {
         if (enabled)
         {
@@ -31,7 +31,7 @@ public static class AutoStart
                 return true;
             }
 
-            return Enable(out message);
+            return Enable(out message, allowElevationPrompt);
         }
 
         if (!IsRegistered)
@@ -43,25 +43,92 @@ public static class AutoStart
         return Disable(out message);
     }
 
-    public static bool Enable(out string message)
+    public static bool Enable(out string message, bool allowElevationPrompt = true)
     {
         message = "";
 
         if (TryCreateTask(out string taskError))
         {
             RemoveRunKey();
-            message = "已通过计划任务设置开机自启（登录时不弹 UAC）。";
+            message = "已通过计划任务设置开机自启（登录时不弹 UAC，带管理员权限）。";
+            return true;
+        }
+
+        // 计划任务要管理员才能建（/RL HIGHEST）。这里主动提权建一次：
+        // 建好以后每次登录都是最高权限，读得到 CPU 温度/频率/电压，也不会弹 UAC。
+        string elevatedError = "已跳过提权弹窗";
+        if (allowElevationPrompt && TryCreateTaskElevated(out elevatedError))
+        {
+            RemoveRunKey();
+            message = "已通过计划任务设置开机自启（登录时不弹 UAC，带管理员权限）。";
             return true;
         }
 
         if (TryWriteRunKey(out string runError))
         {
-            message = "计划任务创建失败，已改用注册表自启：每次登录可能弹出 UAC 提示。";
+            message = "计划任务创建失败，已改用注册表自启：开机启动时没有管理员权限，"
+                + "CPU 温度 / 频率 / 电压会显示不出来。建议以管理员身份运行本程序后重新勾选一次。";
             return true;
         }
 
-        message = "设置失败：" + taskError + " / " + runError;
+        message = "设置失败：" + taskError + " / " + elevatedError + " / " + runError;
         return false;
+    }
+
+    /// <summary>
+    /// 启动时自检：把"能开机自启但没有管理员权限"的旧状态修正过来。
+    /// 只在已提权时动手（否则建不了最高权限任务）。
+    /// 返回是否做了修改，便于写日志。
+    /// </summary>
+    public static bool EnsureElevatedAutostart(bool isElevated, out string note)
+    {
+        note = "";
+        if (!isElevated || !IsRegistered) return false;
+
+        if (TaskExists())
+        {
+            if (TaskRunsElevated()) return false;
+
+            // 任务存在但不是最高权限：重建一次
+            TryDeleteTask(out _);
+            if (TryCreateTask(out _))
+            {
+                note = "开机自启：计划任务已升级为最高权限（登录后可直接读 CPU 温度/频率/电压）。";
+                SettingsStore.Log(note);
+                return true;
+            }
+
+            return false;
+        }
+
+        if (!RunKeyExists()) return false;
+
+        // 只有注册表自启（没有计划任务）：换成最高权限计划任务，开机才不会掉权限
+        if (TryCreateTask(out _))
+        {
+            RemoveRunKey();
+            note = "开机自启：已从注册表自启升级为计划任务（带管理员权限，登录不弹 UAC）。";
+            SettingsStore.Log(note);
+            return true;
+        }
+
+        SettingsStore.Log("开机自启：计划任务创建失败，继续保持注册表自启（开机无管理员权限）。");
+        return false;
+    }
+
+    /// <summary>计划任务是否以最高权限运行（读任务定义 XML 判断，不启子进程）。</summary>
+    public static bool TaskRunsElevated()
+    {
+        try
+        {
+            if (!File.Exists(TaskFilePath)) return false;
+            string xml = File.ReadAllText(TaskFilePath);
+            return xml.Contains("HighestAvailable", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public static bool Disable(out string message)
@@ -160,8 +227,45 @@ public static class AutoStart
         return code == 0;
     }
 
-    private static bool TryDeleteTask(out string error)
+    /// <summary>提权创建计划任务（当前不是管理员时的兜底，会弹一次 UAC）。</summary>
+    private static bool TryCreateTaskElevated(out string error)
     {
+        error = "";
+        try
+        {
+            string command = $"\"{ExecutablePath}\" --autostart";
+            var psi = new ProcessStartInfo("schtasks.exe")
+            {
+                UseShellExecute = true,
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden,
+                Arguments = $"/Create /TN \"{TaskName}\" /TR \"{command}\" /SC ONLOGON /RL HIGHEST /F"
+            };
+
+            using Process? p = Process.Start(psi);
+            if (p == null)
+            {
+                error = "无法启动提权进程。";
+                return false;
+            }
+
+            p.WaitForExit(20000);
+            if (!p.HasExited || p.ExitCode != 0)
+            {
+                error = "提权创建计划任务失败（用户可能取消了 UAC）。";
+                return false;
+            }
+
+            return TaskExists();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private static bool TryDeleteTask(out string error)    {
         (int code, string output) = Run("schtasks.exe", new[] { "/Delete", "/TN", TaskName, "/F" });
         error = code == 0 ? "" : output.Trim();
         return code == 0;

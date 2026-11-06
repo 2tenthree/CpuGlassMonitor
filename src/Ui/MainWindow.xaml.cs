@@ -356,7 +356,7 @@ public partial class MainWindow : Window
         else if (WantsCpuTemperature() && !HasCpuTemperatureNow())
         {
             hint = _elevated || _engine.CpuTemperatureAvailable
-                ? "未读到 CPU 温度：这台机器的温控芯片可能还没被支持，可在设置里改看负载/频率"
+                ? "未读到 CPU 温度：若开着「内核隔离/内存完整性」或装了 Hyper-V、WSL2，MSR 会被拦住，关掉后重开本程序试试"
                 : "受限模式：CPU 温度/频率/电压需要管理员权限";
         }
 

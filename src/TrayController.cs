@@ -1,7 +1,10 @@
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Resources;
+using System.Windows.Threading;
 using CpuGlassMonitor.Core;
 using CpuGlassMonitor.Ui;
 using Forms = System.Windows.Forms;
@@ -15,6 +18,8 @@ public sealed class TrayController : IDisposable
     private readonly Forms.ContextMenuStrip _menu;
     private readonly MainWindow _window;
     private MemoryStream? _iconStream;
+    private HwndSource? _messageSink;
+    private int _taskbarCreatedMessage;
 
     private Forms.ToolStripMenuItem _showItem = null!;
     private Forms.ToolStripMenuItem _settingsItem = null!;
@@ -95,6 +100,68 @@ public sealed class TrayController : IDisposable
         _notifyIcon.DoubleClick += (_, _) => _window.ShowAndActivate();
 
         _ = settings;
+
+        // 开机自启时程序可能比资源管理器先起来（托盘区还没创建），
+        // 这时 NotifyIcon 加进去会丢失；explorer 启动/重启后会广播 TaskbarCreated，
+        // 收到就重新挂一次图标。
+        AttachTaskbarListener();
+
+        // 兜底：登录后几秒再确认一次（启动早于托盘区时用）
+        var retry = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
+        retry.Tick += (_, _) =>
+        {
+            retry.Stop();
+            ReattachIcon("启动后重挂");
+        };
+        retry.Start();
+    }
+
+    private void AttachTaskbarListener()
+    {
+        try
+        {
+            _taskbarCreatedMessage = RegisterWindowMessage("TaskbarCreated");
+            var parameters = new HwndSourceParameters("CpuGlassMonitorTraySink")
+            {
+                Width = 0,
+                Height = 0,
+                WindowStyle = 0, // 隐藏的顶层窗口，才能收到桌面广播消息
+                ParentWindow = IntPtr.Zero
+            };
+
+            _messageSink = new HwndSource(parameters);
+            _messageSink.AddHook(WndProc);
+        }
+        catch (Exception ex)
+        {
+            SettingsStore.Log("托盘消息窗口创建失败: " + ex.Message);
+        }
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (_taskbarCreatedMessage != 0 && msg == _taskbarCreatedMessage)
+        {
+            // 资源管理器重启了：图标已经被系统清掉，重新加回来
+            ReattachIcon("资源管理器重启");
+        }
+
+        return IntPtr.Zero;
+    }
+
+    /// <summary>重新挂载托盘图标（先置 false 再置 true 才会真正重建）。</summary>
+    public void ReattachIcon(string reason)
+    {
+        try
+        {
+            _notifyIcon.Visible = false;
+            _notifyIcon.Visible = true;
+            SettingsStore.Log("托盘图标已重新挂载（" + reason + "）");
+        }
+        catch (Exception ex)
+        {
+            SettingsStore.Log("托盘图标重新挂载失败: " + ex.Message);
+        }
     }
 
     private Forms.ToolStripMenuItem CreateCheck(string text, Func<bool> getter, Action<bool> setter)
@@ -145,6 +212,8 @@ public sealed class TrayController : IDisposable
     {
         try
         {
+            _messageSink?.Dispose();
+            _messageSink = null;
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
             _menu.Dispose();
@@ -155,6 +224,9 @@ public sealed class TrayController : IDisposable
             // 忽略
         }
     }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int RegisterWindowMessage(string message);
 
     private sealed class DarkMenuRenderer : Forms.ToolStripProfessionalRenderer
     {

@@ -146,6 +146,29 @@ public partial class SettingsWindow : Window
         }
     }
 
+    /// <summary>
+    /// 开机自启的权限提示：如果只是注册表自启（或任务不是最高权限），
+    /// 开机那次启动拿不到管理员权限，面板上的 CPU 温度/频率/电压就是空的。
+    /// </summary>
+    private void UpdateAutoStartHint()
+    {
+        bool registered = AutoStart.IsRegistered;
+        bool task = AutoStart.TaskExists();
+        bool taskElevated = task && AutoStart.TaskRunsElevated();
+
+        if (!registered || taskElevated)
+        {
+            AutoStartHint.Visibility = Visibility.Collapsed;
+            AutoStartHint.Text = "";
+            return;
+        }
+
+        AutoStartHint.Text = task
+            ? "当前计划任务不是最高权限，开机自启时读不到 CPU 温度/频率/电压。取消再勾选一次可升级（会弹一次 UAC）。"
+            : "当前是注册表自启，开机时没有管理员权限，读不到 CPU 温度/频率/电压。取消再勾选一次可升级为计划任务（会弹一次 UAC）。";
+        AutoStartHint.Visibility = Visibility.Visible;
+    }
+
     private void LoadFromSettings()
     {
         TintSlider.Value = _settings.TintStrength;
@@ -159,6 +182,7 @@ public partial class SettingsWindow : Window
         ChkClickThrough.IsChecked = _settings.ClickThrough;
         // 以实际注册情况为准：任务/Run 键还在就显示为勾选
         ChkAutoStart.IsChecked = AutoStart.IsRegistered;
+        UpdateAutoStartHint();
         ChkElevate.IsChecked = _settings.AskElevation;
         ChkShowAll.IsChecked = _settings.ShowAllSensors;
 
@@ -331,6 +355,7 @@ public partial class SettingsWindow : Window
         ChkLock.IsChecked = defaults.Locked;
         ChkClickThrough.IsChecked = defaults.ClickThrough;
         ChkAutoStart.IsChecked = AutoStart.IsRegistered;
+        UpdateAutoStartHint();
         ChkElevate.IsChecked = defaults.AskElevation;
         ChkShowAll.IsChecked = false;
 
@@ -375,6 +400,7 @@ public partial class SettingsWindow : Window
         // 以系统真实状态回写，避免"取消勾选后重开又变成勾上"
         built.WithWindows = AutoStart.IsRegistered;
         ChkAutoStart.IsChecked = built.WithWindows;
+        UpdateAutoStartHint();
 
         Result = built;
         DialogResult = true;

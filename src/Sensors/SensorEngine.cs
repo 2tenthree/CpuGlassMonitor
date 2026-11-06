@@ -49,11 +49,16 @@ public sealed class SensorEngine : IDisposable
     private readonly Dictionary<string, MetricSpec> _catalog = new(StringComparer.Ordinal);
     private readonly List<(string Key, Func<SensorReading, double?> Compute)> _aggregates = new();
     private readonly NetworkSampler _network = new();
+    private readonly ThermalZone _thermalZone = new();
+    private bool _thermalZoneLogged;
 
     private Computer? _computer;
     private Thread? _worker;
     private volatile bool _running;
     private volatile int _intervalMs = 1000;
+
+    // 采集线程与「重载传感器」互斥，避免 Close/Open 和 Update 撞在一起
+    private readonly object _sync = new();
 
     public IReadOnlyDictionary<string, MetricSpec> Catalog => _catalog;
 
@@ -108,6 +113,7 @@ public sealed class SensorEngine : IDisposable
         CollectHardware(_computer);
         SensorReading first = ReadOnce();
         BuildCatalog(first);
+        SettingsStoreShim.Log("传感器: " + DescribeDriverState());
     }
 
     private void CollectHardware(Computer computer)
@@ -159,7 +165,12 @@ public sealed class SensorEngine : IDisposable
             var sw = Stopwatch.StartNew();
             try
             {
-                SensorReading reading = ReadOnce();
+                SensorReading reading;
+                lock (_sync)
+                {
+                    reading = ReadOnce();
+                }
+
                 Updated?.Invoke(reading);
             }
             catch (Exception ex)
@@ -173,6 +184,124 @@ public sealed class SensorEngine : IDisposable
             {
                 Thread.Sleep(Math.Min(30, remain - slept));
             }
+        }
+    }
+
+    /// <summary>
+    /// 重载传感器（关掉 LHM 再开一次）。
+    /// 用于「已经是管理员，但 CPU 温度/频率/电压全是空」的情况：常见原因是
+    /// ring0 驱动在开机瞬间没加载成功，或者驱动服务指向了旧的 .sys 文件。
+    /// 返回是否重载成功，note 写日志给用户看。
+    /// </summary>
+    public bool RestartHardware(out string note)
+    {
+        note = "";
+        try
+        {
+            lock (_sync)
+            {
+                try
+                {
+                    _computer?.Close();
+                }
+                catch
+                {
+                    // 忽略
+                }
+
+                _computer = null;
+                _hardware.Clear();
+                _rawSensors.Clear();
+
+                Open();
+            }
+
+            note = DescribeDriverState();
+            return IsOpen;
+        }
+        catch (Exception ex)
+        {
+            note = "重载失败: " + ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 强制重装 ring0 驱动服务：常见故障是服务注册在旧路径（换过 exe 目录、或另一边副本装过），
+    /// 新副本就再也读不到 CPU 温度。这里把服务删掉，让 LHM 下次 Open 重新装一份。
+    /// 需要管理员权限，失败就安静返回 false。
+    /// </summary>
+    public static bool TryResetDriverService(out string note)
+    {
+        note = "";
+        try
+        {
+            string exeName = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "CpuGlassMonitor");
+            string serviceName = "R0" + exeName;
+            string sysPath = Path.Combine(AppContext.BaseDirectory, exeName + ".sys");
+
+            var psi = new ProcessStartInfo("sc.exe", $"delete {serviceName}")
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using Process? p = Process.Start(psi);
+            if (p == null)
+            {
+                note = "无法启动 sc.exe";
+                return false;
+            }
+
+            p.WaitForExit(8000);
+
+            try
+            {
+                if (File.Exists(sysPath)) File.Delete(sysPath);
+            }
+            catch
+            {
+                // 文件被占用就留着，下次 Open 会覆盖
+            }
+
+            note = $"已删除驱动服务 {serviceName}（exit={p.ExitCode}）";
+            return p.ExitCode == 0;
+        }
+        catch (Exception ex)
+        {
+            note = "重置驱动服务失败: " + ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>把 ring0 驱动服务/文件的状态写下来，方便判断"为什么读不到温度"。</summary>
+    public static string DescribeDriverState()
+    {
+        try
+        {
+            string exeName = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "CpuGlassMonitor");
+            string serviceName = "R0" + exeName;
+            string sysPath = Path.Combine(AppContext.BaseDirectory, exeName + ".sys");
+
+            string imagePath = "";
+            try
+            {
+                using Microsoft.Win32.RegistryKey? key = Microsoft.Win32.Registry.LocalMachine
+                    .OpenSubKey(@"SYSTEM\CurrentControlSet\Services\" + serviceName);
+                imagePath = key?.GetValue("ImagePath") as string ?? "";
+            }
+            catch
+            {
+                // 忽略
+            }
+
+            return $"驱动服务={serviceName} image={imagePath} sys存在={File.Exists(sysPath)} 进程={Environment.ProcessPath}";
+        }
+        catch (Exception ex)
+        {
+            return "驱动状态读取失败: " + ex.Message;
         }
     }
 
@@ -217,6 +346,23 @@ public sealed class SensorEngine : IDisposable
         _network.Sample();
         reading.Values[AggKeys.NetDown] = _network.DownBytesPerSecond;
         reading.Values[AggKeys.NetUp] = _network.UpBytesPerSecond;
+
+        // CPU 温度兜底：LHM 读不到（VBS/内核隔离拦住了 MSR）就退到 ACPI 热区，
+        // 粗一点但至少能看出热不热。
+        if (!FakeTemps && !reading.Get(AggKeys.CpuTempMax).HasValue)
+        {
+            double? zone = _thermalZone.Read();
+            if (zone.HasValue)
+            {
+                reading.Values[AggKeys.CpuTempMax] = zone.Value;
+                reading.Values[AggKeys.CpuTempAvg] = zone.Value;
+                if (!_thermalZoneLogged)
+                {
+                    _thermalZoneLogged = true;
+                    SettingsStoreShim.Log("CPU 温度来源=ACPI 热区（LHM 读不到 MSR，可能是内核隔离/VBS 拦住）");
+                }
+            }
+        }
 
         // 温度不是一上电就能读到：ring0 驱动装好后第一次 Update 往往还是 null。
         // 所以这个标记必须是「只要读到过一次就为真」，否则 UI 会一直停在"需要管理员权限"。
@@ -780,6 +926,37 @@ public sealed class SensorEngine : IDisposable
         _ => ("", 1, 1, null, null)
     };
 
+    /// <summary>诊断用：把 CPU 硬件的每个传感器（包括取不到值的）逐行描述出来。</summary>
+    public List<string> DumpCpuSensors()
+    {
+        var lines = new List<string>();
+        foreach (IHardware hw in _hardware)
+        {
+            if (hw.HardwareType != HardwareType.Cpu) continue;
+            lines.Add("hw=" + hw.Name + " type=" + hw.HardwareType);
+            try
+            {
+                hw.Update();
+            }
+            catch (Exception ex)
+            {
+                lines.Add("update failed: " + ex.Message);
+            }
+
+            foreach (ISensor sensor in hw.Sensors)
+            {
+                double? v = sensor.Value;
+                string text = v.HasValue ? v.Value.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) : "null";
+                lines.Add($"  {sensor.SensorType}|{sensor.Name}|{sensor.Identifier} = {text}");
+            }
+        }
+
+        return lines;
+    }
+
+    /// <summary>诊断用：把 ACPI 热区的查询结果写进行。</summary>
+    public void DumpThermalZone(List<string> lines) => lines.Add(_thermalZone.Describe());
+
     private static bool IsAdvanced(ISensor sensor)
     {
         string name = sensor.Name;
@@ -794,8 +971,7 @@ public sealed class SensorEngine : IDisposable
     }
 
     public void Dispose()
-    {
-        _running = false;
+    {        _running = false;
         try
         {
             _worker?.Join(500);

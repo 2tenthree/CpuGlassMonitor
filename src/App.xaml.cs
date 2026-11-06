@@ -14,6 +14,8 @@ namespace CpuGlassMonitor;
 public partial class App : Application
 {
     private Mutex? _mutex;
+    private DispatcherTimer? _driverWatch;
+    private int _driverRestarts;
 
     // 用独立配置目录（CPUGLASS_CONFIG_DIR）跑测试实例时，互斥量名也跟着变，
     // 免得测试进程被用户正在用的那个实例挡住。
@@ -32,6 +34,9 @@ public partial class App : Application
     public static bool NoElevate { get; private set; }
     public static bool FakeTemps { get; private set; }
 
+    /// <summary>--dump-cpu：自检时把 CPU 的每个传感器（含 null 值）都写进日志。</summary>
+    public static bool DumpCpuSensors { get; private set; }
+
     public static AppSettings CurrentSettings => Current is App app ? app.Settings : new AppSettings();
 
     public static void NotifySettingsChanged()
@@ -49,10 +54,17 @@ public partial class App : Application
         base.OnStartup(e);
 
         NoElevate = e.Args.Any(a => a.Equals("--no-elevate", StringComparison.OrdinalIgnoreCase));
+
+        // --config <目录>：把配置/日志目录改到指定位置（提权实例不继承环境变量，调试时用它）
+        int configIndex = Array.FindIndex(e.Args, a => a.Equals("--config", StringComparison.OrdinalIgnoreCase));
+        if (configIndex >= 0 && configIndex + 1 < e.Args.Length)
+        {
+            SettingsStore.OverrideDirectory(e.Args[configIndex + 1]);
+        }
         bool fakeTemps = e.Args.Any(a => a.Equals("--fake-temps", StringComparison.OrdinalIgnoreCase));
         FakeTemps = fakeTemps;
         bool autostart = e.Args.Any(a => a.Equals("--autostart", StringComparison.OrdinalIgnoreCase));
-        _ = autostart;
+        DumpCpuSensors = e.Args.Any(a => a.Equals("--dump-cpu", StringComparison.OrdinalIgnoreCase));
         SettingsStore.Log("启动: " + string.Join(' ', e.Args) + " | exe=" + Environment.ProcessPath);
 
         if (e.Args.Any(a => a.Equals("--selftest", StringComparison.OrdinalIgnoreCase)))
@@ -94,9 +106,15 @@ public partial class App : Application
         Settings = SettingsStore.Load();
         IsElevated = CheckElevated();
 
-        // 读取 CPU 温度/频率/电压需要管理员权限，因此自动以管理员身份重启自身
+        // 读取 CPU 温度/频率/电压需要管理员权限，因此自动以管理员身份重启自身。
+        // 例外：开机自启时不要再弹 UAC（登录瞬间没人点确认，弹出来也会被拒），
+        // 自启应该由「最高权限计划任务」直接带管理员身份启动，见 AutoStart.EnsureElevatedAutostart。
         bool relaunched = e.Args.Any(a => a.Equals("--elevated", StringComparison.OrdinalIgnoreCase));
-        if (!IsElevated && Settings.AskElevation && !NoElevate && !relaunched)
+        if (!IsElevated && autostart)
+        {
+            SettingsStore.Log("自启启动但未提权：计划任务可能不是最高权限，本次以受限模式运行。");
+        }
+        else if (!IsElevated && Settings.AskElevation && !NoElevate && !relaunched)
         {
             if (TryRelaunchElevated(e.Args))
             {
@@ -199,7 +217,65 @@ public partial class App : Application
 
             Shell?.OnEngineReady();
             Tray?.SyncState();
+            StartDriverWatchdog();
         }));
+    }
+
+    /// <summary>
+    /// 已经是管理员却读不到 CPU 温度时，重载一次传感器驱动。
+    /// 开机自启瞬间 ring0 驱动没加载成功（或驱动服务指向旧 .sys）时靠这个自愈，
+    /// 不用用户手动退出重开。
+    /// </summary>
+    private void StartDriverWatchdog()
+    {
+        if (Engine == null || !IsElevated || Engine.FakeTemps) return;
+
+        _driverWatch?.Stop();
+        _driverRestarts = 0;
+        _driverWatch = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
+        _driverWatch.Tick += (_, _) =>
+        {
+            if (Engine == null) return;
+
+            if (Engine.CpuTemperatureAvailable)
+            {
+                _driverWatch?.Stop();
+                return;
+            }
+
+            if (_driverRestarts >= 2)
+            {
+                _driverWatch?.Stop();
+                SettingsStore.Log("CPU 温度始终读不到，已放弃自动重载: " + SensorEngine.DescribeDriverState());
+                return;
+            }
+
+            _driverRestarts++;
+            int attempt = _driverRestarts;
+            SettingsStore.Log($"CPU 温度读不到，第 {attempt} 次重载传感器驱动");
+            Task.Run(() =>
+            {
+                string note = "";
+
+                // 第二次重载前先清掉可能指向旧路径的驱动服务
+                if (attempt >= 2)
+                {
+                    bool reset = SensorEngine.TryResetDriverService(out string resetNote);
+                    SettingsStore.Log($"重置驱动服务: ok={reset} {resetNote}");
+                }
+
+                bool ok = Engine != null && Engine.RestartHardware(out note);
+                SettingsStore.Log($"重载传感器驱动完成: ok={ok} {note}");
+                if (!ok) return;
+
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    Shell?.ApplySettings(Settings);
+                    Tray?.SyncState();
+                }));
+            });
+        };
+        _driverWatch.Start();
     }
 
     /// <summary>
@@ -214,6 +290,13 @@ public partial class App : Application
             try
             {
                 registered = AutoStart.IsRegistered;
+
+                // 顺手把「能自启但没有管理员权限」的旧状态修正掉：
+                // 注册表自启 → 换成最高权限计划任务；任务不是 HIGHEST → 重建。
+                if (registered && AutoStart.EnsureElevatedAutostart(IsElevated, out _))
+                {
+                    registered = AutoStart.IsRegistered;
+                }
             }
             catch (Exception ex)
             {
@@ -404,6 +487,14 @@ public partial class App : Application
                 }
             }
 
+            // --dump-cpu：把 CPU 的每个传感器（含 null）都打出来，用来判断"传感器没创建"还是"创建了但读不到"
+            if (DumpCpuSensors)
+            {
+                lines.Add("---- dump cpu sensors ----");
+                foreach (string line in Engine.DumpCpuSensors()) lines.Add(line);
+                Engine.DumpThermalZone(lines);
+            }
+
             Engine.Dispose();
         }
         catch (Exception ex)
@@ -422,19 +513,23 @@ public partial class App : Application
         try
         {
             lines.Add("initial=" + AutoStart.IsRegistered);
-            bool ok1 = AutoStart.Sync(true, out string m1);
+            lines.Add("taskExists=" + AutoStart.TaskExists() + " runKey=" + AutoStart.RunKeyExists()
+                + " taskElevated=" + AutoStart.TaskRunsElevated());
+            lines.Add("ensure elevated -> " + AutoStart.EnsureElevatedAutostart(IsElevated, out string note) + " " + note);
+
+            bool ok1 = AutoStart.Sync(true, out string m1, allowElevationPrompt: false);
             lines.Add($"enable ok={ok1} registered={AutoStart.IsRegistered} msg={m1}");
 
-            bool ok2 = AutoStart.Sync(false, out string m2);
+            bool ok2 = AutoStart.Sync(false, out string m2, allowElevationPrompt: false);
             lines.Add($"disable ok={ok2} registered={AutoStart.IsRegistered} msg={m2}");
 
-            bool ok3 = AutoStart.Sync(false, out string m3);
+            bool ok3 = AutoStart.Sync(false, out string m3, allowElevationPrompt: false);
             lines.Add($"disable-again ok={ok3} registered={AutoStart.IsRegistered} msg={m3}");
 
-            bool ok4 = AutoStart.Sync(true, out string m4);
+            bool ok4 = AutoStart.Sync(true, out string m4, allowElevationPrompt: false);
             lines.Add($"enable-again ok={ok4} registered={AutoStart.IsRegistered} msg={m4}");
 
-            bool ok5 = AutoStart.Sync(false, out string m5);
+            bool ok5 = AutoStart.Sync(false, out string m5, allowElevationPrompt: false);
             lines.Add($"final-disable ok={ok5} registered={AutoStart.IsRegistered} msg={m5}");
         }
         catch (Exception ex)

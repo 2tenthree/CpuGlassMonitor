@@ -10,6 +10,7 @@
     <SolidColorBrush x:Key="TextPrimaryBrush" Color="#F2F7FF" />
     <SolidColorBrush x:Key="TextSecondaryBrush" Color="#AEBFCF" />
     <SolidColorBrush x:Key="TextTertiaryBrush" Color="#7C8EA3" />
+    <SolidColorBrush x:Key="WarnBrush" Color="#FFC857" />
     <SolidColorBrush x:Key="SurfaceBrush" Color="#12161C" />
 
     <FontFamily x:Key="UiFont">Segoe UI Variable Text, Microsoft YaHei UI, Segoe UI</FontFamily>

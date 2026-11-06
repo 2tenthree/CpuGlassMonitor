@@ -116,6 +116,56 @@ public static class AutoStart
         return false;
     }
 
+    /// <summary>
+    /// 自启项可能还指着旧的 exe 路径（换过目录、或换过发布文件夹）。
+    /// 那样开机启动的是旧副本（甚至是不存在的文件），现象就是"开机后没起来"。
+    /// 这里把指向不对的自启项更新成当前程序路径。
+    /// </summary>
+    public static bool EnsureTargetsCurrentExe(out string note)
+    {
+        note = "";
+        try
+        {
+            string exe = ExecutablePath;
+
+            if (TaskExists())
+            {
+                string xml = File.Exists(TaskFilePath) ? File.ReadAllText(TaskFilePath) : "";
+                if (xml.Contains(exe, StringComparison.OrdinalIgnoreCase)) return false;
+                if (!TryCreateTask(out _)) return false;
+
+                note = "开机自启：计划任务原来指向旧路径，已更新为当前程序。";
+                SettingsStore.Log(note);
+                return true;
+            }
+
+            if (!RunKeyExists()) return false;
+
+            string current = "";
+            try
+            {
+                using Microsoft.Win32.RegistryKey? key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey);
+                current = key?.GetValue(RunValue) as string ?? "";
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (current.Contains(exe, StringComparison.OrdinalIgnoreCase)) return false;
+            if (!TryWriteRunKey(out _)) return false;
+
+            note = "开机自启：注册表项原来指向旧路径，已更新为当前程序。";
+            SettingsStore.Log(note);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            SettingsStore.Log("检查自启路径失败: " + ex.Message);
+            return false;
+        }
+    }
+
     /// <summary>计划任务是否以最高权限运行（读任务定义 XML 判断，不启子进程）。</summary>
     public static bool TaskRunsElevated()
     {

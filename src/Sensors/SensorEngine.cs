@@ -86,6 +86,11 @@ public sealed class SensorEngine : IDisposable
 
     public void Open()
     {
+        // 换过 exe 目录（比如从 src\bin 换到 dist）之后，旧的服务还指着已经删掉的 .sys，
+        // LHM 看到"服务已存在"就跳过安装、直接启动，于是永远读不到 MSR。
+        // 这里在 Open 之前先把这个过期服务清掉，让 LHM 用当前目录重新装一份。
+        DropStaleDriverService();
+
         try
         {
             _computer = new Computer
@@ -273,6 +278,75 @@ public sealed class SensorEngine : IDisposable
         {
             note = "重置驱动服务失败: " + ex.Message;
             return false;
+        }
+    }
+
+    /// <summary>
+    /// 如果驱动服务已经注册，但它的 ImagePath 指向的 .sys 已经不存在（换过 exe 目录的典型症状），
+    /// 就把服务停掉删掉，让 LHM 的 Open 用当前目录重新装一份。需要管理员权限，失败只记日志。
+    /// </summary>
+    private static void DropStaleDriverService()
+    {
+        try
+        {
+            string exeName = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "CpuGlassMonitor");
+            string serviceName = "R0" + exeName;
+            string expected = Path.Combine(AppContext.BaseDirectory, exeName + ".sys");
+
+            string? imagePath = null;
+            try
+            {
+                using Microsoft.Win32.RegistryKey? key = Microsoft.Win32.Registry.LocalMachine
+                    .OpenSubKey(@"SYSTEM\CurrentControlSet\Services\" + serviceName);
+                imagePath = key?.GetValue("ImagePath") as string;
+            }
+            catch
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(imagePath)) return;
+
+            string file = imagePath.Replace(@"\??\", "").Trim();
+            bool sameAsOurs = string.Equals(
+                Path.GetFullPath(file),
+                Path.GetFullPath(expected),
+                StringComparison.OrdinalIgnoreCase);
+
+            if (sameAsOurs && File.Exists(expected)) return;
+
+            SettingsStoreShim.Log($"驱动服务指向旧路径，准备重装：image={imagePath} 期望={expected}");
+            RunSc($"stop {serviceName}");
+            RunSc($"delete {serviceName}");
+        }
+        catch (Exception ex)
+        {
+            SettingsStoreShim.Log("检查驱动服务失败: " + ex.Message);
+        }
+    }
+
+    /// <summary>跑一条 sc 命令，吞掉所有异常，只返回退出码。</summary>
+    private static int RunSc(string arguments)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("sc.exe", arguments)
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using Process? p = Process.Start(psi);
+            if (p == null) return -1;
+
+            p.WaitForExit(8000);
+            return p.ExitCode;
+        }
+        catch
+        {
+            return -1;
         }
     }
 

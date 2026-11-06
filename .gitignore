@@ -23,3 +23,8 @@ tools/*
 # 绯荤粺
 Thumbs.db
 desktop.ini
+
+# 发布产物（由 dotnet publish 生成）
+app/
+release/
+

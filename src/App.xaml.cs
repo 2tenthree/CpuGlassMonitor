@@ -106,6 +106,12 @@ public partial class App : Application
         Settings = SettingsStore.Load();
         IsElevated = CheckElevated();
 
+        // 如果用户给这个 exe 勾过「属性 → 兼容性 → 以管理员身份运行此程序」，
+        // 那么开机自启（注册表 Run / 计划任务）会在登录瞬间被 UAC 拦住而静默失败，
+        // 表现就是"开机后程序没起来、托盘也没有图标"。这里把这条标记清掉，
+        // 让提权由程序自己控制（runas 一次，或计划任务 /RL HIGHEST）。
+        TryClearRunAsAdminLayer();
+
         // 读取 CPU 温度/频率/电压需要管理员权限，因此自动以管理员身份重启自身。
         // 例外：开机自启时不要再弹 UAC（登录瞬间没人点确认，弹出来也会被拒），
         // 自启应该由「最高权限计划任务」直接带管理员身份启动，见 AutoStart.EnsureElevatedAutostart。
@@ -147,6 +153,19 @@ public partial class App : Application
         }
 
         Tray = new TrayController(Shell, Settings);
+
+        // 面板接近全透明或开了鼠标穿透时，用户会以为"程序没起来 / 图标没了"，
+        // 这里给一条气泡说明它就在托盘里。
+        if (Settings.ClickThrough || Settings.PanelTransparency > 0.8)
+        {
+            var tip = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
+            tip.Tick += (_, _) =>
+            {
+                tip.Stop();
+                Tray?.ShowTip("CPU 玻璃监控已在托盘运行", "右键托盘图标可显示设置、退出；双击面板可打开设置。");
+            };
+            tip.Start();
+        }
 
         // 自启状态与传感器无关，先校准，别被后面的驱动初始化卡住
         ReconcileAutoStart();
@@ -228,10 +247,15 @@ public partial class App : Application
     /// </summary>
     private void StartDriverWatchdog()
     {
-        if (Engine == null || !IsElevated || Engine.FakeTemps) return;
+        if (Engine == null || !IsElevated || Engine.FakeTemps)
+        {
+            SettingsStore.Log($"驱动看门狗未启动: engine={(Engine != null)} elevated={IsElevated} fakeTemps={Engine?.FakeTemps}");
+            return;
+        }
 
         _driverWatch?.Stop();
         _driverRestarts = 0;
+        SettingsStore.Log("驱动看门狗已启动（6 秒后检查 CPU 温度）");
         _driverWatch = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
         _driverWatch.Tick += (_, _) =>
         {
@@ -291,10 +315,12 @@ public partial class App : Application
             {
                 registered = AutoStart.IsRegistered;
 
-                // 顺手把「能自启但没有管理员权限」的旧状态修正掉：
-                // 注册表自启 → 换成最高权限计划任务；任务不是 HIGHEST → 重建。
-                if (registered && AutoStart.EnsureElevatedAutostart(IsElevated, out _))
+                // 自启项如果还指着旧 exe 路径（换过发布目录），开机启动的就是旧副本，
+                // 现象是"开机后程序没起来"。这里先修路径，再升级权限。
+                if (registered)
                 {
+                    AutoStart.EnsureTargetsCurrentExe(out _);
+                    AutoStart.EnsureElevatedAutostart(IsElevated, out _);
                     registered = AutoStart.IsRegistered;
                 }
             }
@@ -612,6 +638,36 @@ public partial class App : Application
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// 清掉本程序路径上的「以管理员身份运行」兼容性标记。
+    /// 这条标记会让开机自启在登录瞬间被 UAC 拦住而静默失败（用户看到的就是"没启动、没托盘图标"）。
+    /// 失败只记日志，不影响启动。
+    /// </summary>
+    private static void TryClearRunAsAdminLayer()
+    {
+        try
+        {
+            string? exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe)) return;
+
+            using Microsoft.Win32.RegistryKey? key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+                writable: true);
+
+            if (key == null) return;
+
+            if (key.GetValue(exe) is not string value) return;
+            if (!value.Contains("RUNASADMIN", StringComparison.OrdinalIgnoreCase)) return;
+
+            key.DeleteValue(exe, throwOnMissingValue: false);
+            SettingsStore.Log("已移除本程序路径上的「以管理员身份运行」兼容性标记: " + exe);
+        }
+        catch (Exception ex)
+        {
+            SettingsStore.Log("清理兼容性标记失败: " + ex.Message);
         }
     }
 

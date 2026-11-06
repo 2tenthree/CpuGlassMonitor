@@ -20,6 +20,8 @@ public sealed class TrayController : IDisposable
     private MemoryStream? _iconStream;
     private HwndSource? _messageSink;
     private int _taskbarCreatedMessage;
+    private DispatcherTimer? _retry;
+    private int _reattachLeft;
 
     private Forms.ToolStripMenuItem _showItem = null!;
     private Forms.ToolStripMenuItem _settingsItem = null!;
@@ -106,14 +108,23 @@ public sealed class TrayController : IDisposable
         // 收到就重新挂一次图标。
         AttachTaskbarListener();
 
-        // 兜底：登录后几秒再确认一次（启动早于托盘区时用）
-        var retry = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
-        retry.Tick += (_, _) =>
+        // 兜底：登录后前 90 秒每 10 秒重新确认一次（启动早于托盘区时用），
+        // 只要图标真的在就不会有任何副作用，链路断了才会被这套重试救回来。
+        _reattachLeft = 9;
+        _retry = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
+        _retry.Tick += (_, _) =>
         {
-            retry.Stop();
-            ReattachIcon("启动后重挂");
+            _reattachLeft--;
+            if (_reattachLeft <= 0)
+            {
+                _retry?.Stop();
+                return;
+            }
+
+            ReattachIcon("启动后保活", quiet: true);
         };
-        retry.Start();
+        _retry.Start();
+        ReattachIcon("启动后重挂");
     }
 
     private void AttachTaskbarListener()
@@ -150,17 +161,71 @@ public sealed class TrayController : IDisposable
     }
 
     /// <summary>重新挂载托盘图标（先置 false 再置 true 才会真正重建）。</summary>
-    public void ReattachIcon(string reason)
+    public void ReattachIcon(string reason, bool quiet = false)
     {
         try
         {
             _notifyIcon.Visible = false;
             _notifyIcon.Visible = true;
-            SettingsStore.Log("托盘图标已重新挂载（" + reason + "）");
+            if (!quiet) SettingsStore.Log("托盘图标已重新挂载（" + reason + "）");
+            TryPromoteInTray();
         }
         catch (Exception ex)
         {
             SettingsStore.Log("托盘图标重新挂载失败: " + ex.Message);
+        }
+    }
+
+    /// <summary>弹一条托盘气泡（用于告诉用户"我在这儿"）。</summary>
+    public void ShowTip(string title, string text)
+    {
+        try
+        {
+            _notifyIcon.BalloonTipTitle = title;
+            _notifyIcon.BalloonTipText = text;
+            _notifyIcon.BalloonTipIcon = Forms.ToolTipIcon.None;
+            _notifyIcon.ShowBalloonTip(8000);
+        }
+        catch
+        {
+            // 忽略：某些系统上气泡被策略禁用
+        }
+    }
+
+    /// <summary>
+    /// Win11 默认把新图标的托盘项放进"隐藏的图标"浮窗里，用户会以为程序没有图标。
+    /// 这里把本程序在 NotifyIconSettings 里的 IsPromoted 置 1（相当于在
+    /// 设置 → 个性化 → 任务栏 → 其他系统托盘图标 里手动打开它）。
+    /// </summary>
+    private static void TryPromoteInTray()
+    {
+        try
+        {
+            string? exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe)) return;
+
+            using Microsoft.Win32.RegistryKey? root = Microsoft.Win32.Registry.CurrentUser
+                .OpenSubKey(@"Control Panel\NotifyIconSettings", writable: true);
+
+            if (root == null) return;
+
+            foreach (string name in root.GetSubKeyNames())
+            {
+                using Microsoft.Win32.RegistryKey? item = root.OpenSubKey(name, writable: true);
+                if (item == null) continue;
+
+                if (item.GetValue("ExecutablePath") is not string path) continue;
+                if (!string.Equals(path, exe, StringComparison.OrdinalIgnoreCase)) continue;
+                if (item.GetValue("IsPromoted") is int promoted && promoted == 1) return;
+
+                item.SetValue("IsPromoted", 1, Microsoft.Win32.RegistryValueKind.DWord);
+                SettingsStore.Log("已把托盘图标设为常显（IsPromoted=1）");
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            SettingsStore.Log("设置托盘图标常显失败: " + ex.Message);
         }
     }
 
@@ -212,6 +277,8 @@ public sealed class TrayController : IDisposable
     {
         try
         {
+            _retry?.Stop();
+            _retry = null;
             _messageSink?.Dispose();
             _messageSink = null;
             _notifyIcon.Visible = false;

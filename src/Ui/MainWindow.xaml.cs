@@ -27,6 +27,9 @@ public partial class MainWindow : Window
     private bool _updateQueued;
     private bool _restoringPosition;
     private SettingsWindow? _settingsWindow;
+    private HwndSource? _source;
+    private string? _toggleHotkeyName;
+    private string? _settingsHotkeyName;
 
     private static readonly Brush PrimaryValueBrush = Freeze(new SolidColorBrush(Color.FromRgb(0xF2, 0xF7, 0xFF)));
     private static readonly Brush WarnValueBrush = Freeze(new SolidColorBrush(Color.FromRgb(0xFF, 0xC8, 0x57)));
@@ -84,6 +87,85 @@ public partial class MainWindow : Window
         RestorePosition();
         ApplyGlass();
         ApplyClickThrough();
+        RegisterHotkeys();
+    }
+
+    /// <summary>
+    /// 注册全局热键：显示/隐藏面板 + 打开设置。
+    /// 这样即使托盘图标被 Win11 藏进"隐藏的图标"浮窗，用户也不会"找不到程序"。
+    /// 组合键可能被别的软件占用，所以准备了几组候选，取第一个注册成功的。
+    /// </summary>
+    private void RegisterHotkeys()
+    {
+        try
+        {
+            _source = HwndSource.FromHwnd(_hwnd);
+            _source?.AddHook(HotkeyHook);
+
+            var toggleTries = new (uint Mods, uint Key, string Name)[]
+            {
+                (Hotkeys.ModControl | Hotkeys.ModAlt, 0x4D, "Ctrl+Alt+M"),
+                (Hotkeys.ModControl | Hotkeys.ModShift, 0x4D, "Ctrl+Shift+M"),
+                (Hotkeys.ModControl | Hotkeys.ModAlt, 0x50, "Ctrl+Alt+P"),
+                (Hotkeys.ModControl | Hotkeys.ModAlt, 0x4B, "Ctrl+Alt+K")
+            };
+
+            foreach (var (mods, key, name) in toggleTries)
+            {
+                if (!Hotkeys.RegisterHotKey(_hwnd, Hotkeys.TogglePanelId,
+                        mods | Hotkeys.ModNoRepeat, key)) continue;
+                _toggleHotkeyName = name;
+                break;
+            }
+
+            var settingsTries = new (uint Mods, uint Key, string Name)[]
+            {
+                (Hotkeys.ModControl | Hotkeys.ModAlt, 0x53, "Ctrl+Alt+S"),
+                (Hotkeys.ModControl | Hotkeys.ModShift, 0x53, "Ctrl+Shift+S"),
+                (Hotkeys.ModControl | Hotkeys.ModAlt, 0x4F, "Ctrl+Alt+O")
+            };
+
+            foreach (var (mods, key, name) in settingsTries)
+            {
+                if (!Hotkeys.RegisterHotKey(_hwnd, Hotkeys.OpenSettingsId,
+                        mods | Hotkeys.ModNoRepeat, key)) continue;
+                _settingsHotkeyName = name;
+                break;
+            }
+
+            SettingsStore.Log($"全局热键: 显示/隐藏={_toggleHotkeyName ?? "注册失败"} 设置={_settingsHotkeyName ?? "注册失败"}");
+        }
+        catch (Exception ex)
+        {
+            SettingsStore.Log("全局热键注册失败: " + ex.Message);
+        }
+    }
+
+    private IntPtr HotkeyHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg != Hotkeys.WmHotkey) return IntPtr.Zero;
+
+        int id = wParam.ToInt32();
+        if (id == Hotkeys.TogglePanelId)
+        {
+            ToggleVisible();
+            handled = true;
+        }
+        else if (id == Hotkeys.OpenSettingsId)
+        {
+            ShowAndActivate();
+            OpenSettingsFromTray();
+            handled = true;
+        }
+
+        return IntPtr.Zero;
+    }
+
+    /// <summary>可见就隐藏、隐藏就显示。热键与托盘菜单共用。</summary>
+    public void ToggleVisible()
+    {
+        if (IsVisible) Hide();
+        else ShowAndActivate();
     }
 
     public void OnEngineReady()
@@ -112,6 +194,19 @@ public partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         _engine.Updated -= OnReading;
+
+        try
+        {
+            Hotkeys.UnregisterHotKey(_hwnd, Hotkeys.TogglePanelId);
+            Hotkeys.UnregisterHotKey(_hwnd, Hotkeys.OpenSettingsId);
+            _source?.RemoveHook(HotkeyHook);
+            _source = null;
+        }
+        catch
+        {
+            // 退出路径上不折腾
+        }
+
         base.OnClosed(e);
     }
 
@@ -575,18 +670,6 @@ public partial class MainWindow : Window
         }
 
         MessageBox.Show(this, message, "开机自启", MessageBoxButton.OK, MessageBoxImage.Information);
-    }
-
-    public void ToggleVisible()
-    {
-        if (IsVisible)
-        {
-            Hide();
-        }
-        else
-        {
-            ShowAndActivate();
-        }
     }
 
     public void ShowAndActivate()

@@ -79,6 +79,17 @@ public partial class App : Application
             return;
         }
 
+        // --task-xml <文件>：把将要写入的计划任务定义导出（排查自启问题用，不需要管理员）
+        int xmlIndex = Array.FindIndex(e.Args, a => a.Equals("--task-xml", StringComparison.OrdinalIgnoreCase));
+        if (xmlIndex >= 0 && xmlIndex + 1 < e.Args.Length)
+        {
+            string outPath = e.Args[xmlIndex + 1];
+            File.WriteAllText(outPath, AutoStart.ExportTaskXml(), System.Text.Encoding.Unicode);
+            SettingsStore.Log("已导出计划任务定义: " + outPath);
+            Shutdown(0);
+            return;
+        }
+
         if (e.Args.Any(a => a.Equals("--autostart-test", StringComparison.OrdinalIgnoreCase)))
         {
             RunAutoStartTest();

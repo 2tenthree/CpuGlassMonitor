@@ -131,10 +131,19 @@ public static class AutoStart
             if (TaskExists())
             {
                 string xml = File.Exists(TaskFilePath) ? File.ReadAllText(TaskFilePath) : "";
-                if (xml.Contains(exe, StringComparison.OrdinalIgnoreCase)) return false;
+                if (xml.Length == 0) return false;
+
+                bool wrongPath = !xml.Contains(exe, StringComparison.OrdinalIgnoreCase);
+                // 老版本建的任务没有延迟、而且默认"电池上不启动"——这两条都会让开机自启失效
+                bool oldShape = !xml.Contains("<Delay>", StringComparison.OrdinalIgnoreCase)
+                                || xml.Contains("<DisallowStartIfOnBatteries>true", StringComparison.OrdinalIgnoreCase);
+
+                if (!wrongPath && !oldShape) return false;
                 if (!TryCreateTask(out _)) return false;
 
-                note = "开机自启：计划任务原来指向旧路径，已更新为当前程序。";
+                note = oldShape
+                    ? $"开机自启：计划任务已升级（登录后延迟 {StartupDelaySeconds} 秒、电池上也启动）。"
+                    : "开机自启：计划任务原来指向旧路径，已更新为当前程序。";
                 SettingsStore.Log(note);
                 return true;
             }
@@ -308,30 +317,136 @@ public static class AutoStart
         }
     }
 
+    /// <summary>
+    /// 计划任务的 XML 定义。
+    /// 用 XML 而不是 `schtasks /SC ONLOGON` 的原因是命令行建不出这几项：
+    ///   Delay           —— 登录后延迟启动。登录那一瞬间用户配置单元还没挂好、服务子系统也没就绪，
+    ///                      这时启动的进程会出现"HKCU 写不了、%APPDATA% 写不了、驱动装不上"，
+    ///                      表现出来就是"开机自启后读不到温度、托盘也没图标"。
+    ///   DisallowStartIfOnBatteries=false —— 默认值是 true，用电池开机时任务根本不会启动（笔记本常踩）。
+    ///   StartWhenAvailable —— 错过了触发点（睡眠/关机）也补跑。
+    /// </summary>
+    private static string BuildTaskXml()
+    {
+        string user = $"{Environment.UserDomainName}\\{Environment.UserName}";
+        string exe = ExecutablePath;
+        return $@"<?xml version=""1.0"" encoding=""UTF-16""?>
+<Task version=""1.2"" xmlns=""http://schemas.microsoft.com/windows/2004/02/mit/task"">
+  <RegistrationInfo>
+    <Description>CPU 玻璃监控：登录后延迟 {StartupDelaySeconds} 秒启动（带管理员权限，不弹 UAC）</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+      <Delay>PT{StartupDelaySeconds}S</Delay>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id=""Author"">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context=""Author"">
+    <Exec>
+      <Command>{exe}</Command>
+      <Arguments>--autostart</Arguments>
+    </Exec>
+  </Actions>
+</Task>";
+    }
+
+    /// <summary>把计划任务定义导出成字符串（诊断/排查用）。</summary>
+    public static string ExportTaskXml() => BuildTaskXml();
+
+    /// <summary>延迟多少秒启动。可通过环境变量 CPUGLASS_AUTOSTART_DELAY 覆盖（调试用）。</summary>
+    private static int StartupDelaySeconds
+    {
+        get
+        {
+            string raw = Environment.GetEnvironmentVariable("CPUGLASS_AUTOSTART_DELAY") ?? "";
+            return int.TryParse(raw, out int v) && v >= 5 && v <= 600 ? v : 45;
+        }
+    }
+
     private static bool TryCreateTask(out string error)
     {
+        error = "";
+        string xmlPath = Path.Combine(Path.GetTempPath(), "CpuGlassMonitor-task.xml");
+        try
+        {
+            // schtasks /XML 要求 UTF-16
+            File.WriteAllText(xmlPath, BuildTaskXml(), System.Text.Encoding.Unicode);
+
+            (int code, string output) = Run("schtasks.exe", new[]
+            {
+                "/Create", "/TN", TaskName, "/XML", xmlPath, "/F"
+            });
+
+            if (code == 0)
+            {
+                SettingsStore.Log($"开机自启：计划任务已更新（登录后延迟 {StartupDelaySeconds} 秒，最高权限，电池也启动）。");
+                return true;
+            }
+
+            error = output.Trim();
+            SettingsStore.Log("开机自启：计划任务 XML 方式创建失败，回退到命令行方式: " + error);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            try { File.Delete(xmlPath); } catch { }
+        }
+
+        // 回退：老的命令行方式（没有 Delay，但至少能自启）
         string command = $"\"{ExecutablePath}\" --autostart";
-        (int code, string output) = Run("schtasks.exe", new[]
+        (int code2, string output2) = Run("schtasks.exe", new[]
         {
             "/Create", "/TN", TaskName, "/TR", command, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"
         });
-        error = code == 0 ? "" : output.Trim();
-        return code == 0;
+        error = code2 == 0 ? "" : output2.Trim();
+        return code2 == 0;
     }
 
     /// <summary>提权创建计划任务（当前不是管理员时的兜底，会弹一次 UAC）。</summary>
     private static bool TryCreateTaskElevated(out string error)
     {
         error = "";
+        string xmlPath = Path.Combine(Path.GetTempPath(), "CpuGlassMonitor-task-elevated.xml");
         try
         {
-            string command = $"\"{ExecutablePath}\" --autostart";
+            File.WriteAllText(xmlPath, BuildTaskXml(), System.Text.Encoding.Unicode);
+
             var psi = new ProcessStartInfo("schtasks.exe")
             {
                 UseShellExecute = true,
                 Verb = "runas",
                 WindowStyle = ProcessWindowStyle.Hidden,
-                Arguments = $"/Create /TN \"{TaskName}\" /TR \"{command}\" /SC ONLOGON /RL HIGHEST /F"
+                Arguments = $"/Create /TN \"{TaskName}\" /XML \"{xmlPath}\" /F"
             };
 
             using Process? p = Process.Start(psi);
@@ -354,6 +469,10 @@ public static class AutoStart
         {
             error = ex.Message;
             return false;
+        }
+        finally
+        {
+            try { File.Delete(xmlPath); } catch { }
         }
     }
 

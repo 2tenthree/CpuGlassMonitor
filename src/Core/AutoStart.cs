@@ -166,6 +166,48 @@ public static class AutoStart
         }
     }
 
+    /// <summary>把计划任务 / 注册表项的实际内容摘出来，供诊断报告使用。</summary>
+    public static string Describe()
+    {
+        var sb = new System.Text.StringBuilder();
+        try
+        {
+            sb.AppendLine("TaskExists=" + TaskExists() + " TaskRunsElevated=" + TaskRunsElevated());
+            if (File.Exists(TaskFilePath))
+            {
+                string xml = File.ReadAllText(TaskFilePath);
+                string runLevel = System.Text.RegularExpressions.Regex.Match(xml, "<RunLevel>(.*?)</RunLevel>") is { Success: true } m1 ? m1.Groups[1].Value : "-";
+                string command = System.Text.RegularExpressions.Regex.Match(xml, "<Command>(.*?)</Command>") is { Success: true } m2 ? m2.Groups[1].Value : "-";
+                string args = System.Text.RegularExpressions.Regex.Match(xml, "<Arguments>(.*?)</Arguments>") is { Success: true } m3 ? m3.Groups[1].Value : "-";
+                sb.AppendLine($"任务 RunLevel={runLevel}");
+                sb.AppendLine($"任务 Command={command}");
+                sb.AppendLine($"任务 Arguments={args}");
+                sb.AppendLine("任务指向当前程序=" + (command.Contains(ExecutablePath, StringComparison.OrdinalIgnoreCase) ? "是" : "否 → " + ExecutablePath));
+            }
+            else
+            {
+                sb.AppendLine("任务文件不存在: " + TaskFilePath);
+            }
+
+            try
+            {
+                using Microsoft.Win32.RegistryKey? key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey);
+                object? v = key?.GetValue("CpuGlassMonitor");
+                sb.AppendLine("Run 键=" + (v?.ToString() ?? "无"));
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("Run 键读取失败: " + ex.Message);
+            }
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine("Describe 失败: " + ex.Message);
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
     /// <summary>计划任务是否以最高权限运行（读任务定义 XML 判断，不启子进程）。</summary>
     public static bool TaskRunsElevated()
     {

@@ -83,6 +83,10 @@ public partial class App : Application
         // 单实例检测：不能用「createdNew」判断。上一个实例被强杀（或调试用例）后，
         // 内核对象可能仍被别人打开着，createdNew 会一直是 false，导致「明明没有实例在跑」
         // 却一直提示"已有实例在运行"。这里改为争抢所有权：WaitOne(0) 成功才算拿到。
+        // 另外，更新程序后旧实例可能还开着旧代码（表现为"改了也没变化"），
+        // 所以先清掉同名旧实例，日志里也记下它们是谁。
+        KillStaleInstances();
+
         _mutex = new Mutex(false, MutexName);
         bool ownsMutex;
         try
@@ -97,7 +101,7 @@ public partial class App : Application
 
         if (!ownsMutex)
         {
-            SettingsStore.Log("检测到已有实例在运行，本次启动退出。");
+            SettingsStore.Log("检测到已有实例在运行，本次启动退出。实例: " + DescribeInstances().Replace(Environment.NewLine, " | "));
             _mutex.Dispose();
             _mutex = null;
             Shutdown(0);
@@ -134,6 +138,13 @@ public partial class App : Application
 
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += (_, args) => SettingsStore.Log("未处理异常: " + args.ExceptionObject);
+
+        // --diag：放在提权重启之后，这样自动生成的诊断报告是"管理员视角"的（能看到 MSR 读数）
+        if (e.Args.Any(a => a.Equals("--diag", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunDiagnostics();
+            return;
+        }
 
         Engine = new SensorEngine()
         {
@@ -557,6 +568,175 @@ public partial class App : Application
 
         foreach (string line in lines) SettingsStore.Log("[selftest] " + line);
         Shutdown(0);
+    }
+
+    /// <summary>
+    /// --diag：把"为什么读不到温度 / 为什么没有托盘图标"需要的信息全收集到一个文本文件里，
+    /// 写在程序目录（一定能写），并弹框告诉用户文件在哪。用于人工排障。
+    /// </summary>
+    private void RunDiagnostics()
+    {
+        var lines = new List<string>();
+        string reportPath;
+        try
+        {
+            lines.Add("CpuGlassMonitor 诊断报告");
+            lines.Add("时间: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+            lines.Add("程序: " + Environment.ProcessPath);
+            lines.Add("版本: " + typeof(App).Assembly.GetName().Version);
+            lines.Add("系统: " + Environment.OSVersion.VersionString + " (build " + Environment.OSVersion.Version.Build + ")");
+            lines.Add("64 位进程: " + Environment.Is64BitProcess);
+            lines.Add("管理员: " + CheckElevated());
+            lines.Add("配置目录: " + SettingsStore.Directory);
+            lines.Add("");
+
+            lines.Add("---- 设置 ----");
+            Settings = SettingsStore.Load();
+            lines.Add($"WithWindows={Settings.WithWindows} AskElevation={Settings.AskElevation} PanelTransparency={Settings.PanelTransparency} Horizontal={Settings.Horizontal} SelectedKeys={Settings.SelectedKeys.Count}");
+            lines.Add("");
+
+            lines.Add("---- 开机自启 ----");
+            lines.Add("IsRegistered=" + Safe(() => AutoStart.IsRegistered.ToString()));
+            lines.Add("任务文件存在=" + Safe(() => File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "Tasks", "CpuGlassMonitor")).ToString()));
+            lines.Add("任务说明=" + Safe(() => AutoStart.Describe()));
+            lines.Add("");
+
+            lines.Add("---- 托盘 ----");
+            lines.Add(TrayController.DescribeTrayEntries());
+            lines.Add("");
+
+            lines.Add("---- 驱动 ----");
+            lines.Add(Safe(() => SensorEngine.DescribeDriverState()));
+            lines.Add("");
+
+            lines.Add("---- 正在运行的实例 ----");
+            lines.Add(DescribeInstances());
+            lines.Add("");
+
+            lines.Add("---- 传感器 ----");
+            Engine = new SensorEngine { FakeTemps = FakeTemps };
+            Engine.Open();
+            lines.Add($"open cpu={Engine.CpuName} gpu={Engine.GpuName} catalog={Engine.Catalog.Count} cpuTemp={Engine.CpuTemperatureAvailable} error={Engine.Error ?? "-"}");
+
+            SensorReading? last = null;
+            Engine.Updated += r => last = r;
+            Engine.IntervalMs = 500;
+            Engine.Start();
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 6000 && last == null) Thread.Sleep(100);
+            Thread.Sleep(600);
+
+            if (last != null)
+            {
+                lines.Add("agg.cpu.temp.max = " + Describe(last.Get(AggKeys.CpuTempMax)));
+                lines.Add("agg.cpu.clock.avg = " + Describe(last.Get(AggKeys.CpuClockAvg)));
+                lines.Add("agg.cpu.voltage = " + Describe(last.Get(AggKeys.CpuVoltage)));
+                lines.Add("agg.gpu.temp = " + Describe(last.Get(AggKeys.GpuTemp)));
+            }
+            else
+            {
+                lines.Add("reading=NONE");
+            }
+
+            lines.Add("");
+            lines.Add("---- CPU 传感器明细 ----");
+            foreach (string line in Engine.DumpCpuSensors()) lines.Add(line);
+
+            lines.Add("");
+            lines.Add("---- MSR / 热区 / EC ----");
+            Engine.DumpThermalZone(lines);
+
+            Engine.Dispose();
+            Engine = null;
+        }
+        catch (Exception ex)
+        {
+            lines.Add("DIAG EXCEPTION: " + ex);
+        }
+
+        reportPath = Path.Combine(AppContext.BaseDirectory, "diag-report.txt");
+        try
+        {
+            File.WriteAllText(reportPath, string.Join(Environment.NewLine, lines), System.Text.Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            reportPath = Path.Combine(Path.GetTempPath(), "CpuGlassMonitor-diag.txt");
+            try { File.WriteAllText(reportPath, string.Join(Environment.NewLine, lines) + Environment.NewLine + "写程序目录失败: " + ex.Message, System.Text.Encoding.UTF8); } catch { }
+        }
+
+        foreach (string line in lines) SettingsStore.Log("[diag] " + line);
+
+        // 打开报告并弹框，用户点一下确定就完成，不需要找文件
+        try { Process.Start(new ProcessStartInfo("notepad.exe", '"' + reportPath + '"') { UseShellExecute = true }); } catch { }
+        MessageBox.Show("诊断完成，报告已保存到：\n" + reportPath + "\n\n（已用记事本打开，直接把这个文件发给开发者即可）",
+            "CpuGlassMonitor 诊断", MessageBoxButton.OK, MessageBoxImage.Information);
+
+        Shutdown(0);
+    }
+
+    /// <summary>
+    /// 清掉同名的旧实例。升级后旧进程还在跑旧代码（面板写着"已是最新"却还是老样子），
+    /// 或者旧实例已卡死不给托盘图标，都会让人以为"改了没用"。自己除外。
+    /// </summary>
+    private static void KillStaleInstances()
+    {
+        try
+        {
+            int self = Environment.ProcessId;
+            Process[] list = Process.GetProcessesByName("CpuGlassMonitor");
+            if (list.Length == 0) return;
+
+            foreach (Process p in list)
+            {
+                if (p.Id == self) continue;
+
+                string path = "-";
+                try { path = p.MainModule?.FileName ?? "-"; } catch { }
+
+                try
+                {
+                    p.Kill(entireProcessTree: true);
+                    p.WaitForExit(3000);
+                    SettingsStore.Log($"已结束旧实例: pid={p.Id} start={p.StartTime:HH:mm:ss} path={path}");
+                }
+                catch (Exception ex)
+                {
+                    SettingsStore.Log($"结束旧实例失败: pid={p.Id} path={path} {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            SettingsStore.Log("清理旧实例时出错: " + ex.Message);
+        }
+    }
+
+    private static string Describe(double? v) => v.HasValue ? v.Value.ToString("0.##") : "n/a";
+    private static string Safe(Func<string> f)
+    {
+        try { return f() ?? "-"; } catch (Exception ex) { return "ERR: " + ex.Message; }
+    }
+
+    private static string DescribeInstances()
+    {
+        try
+        {
+            var list = Process.GetProcessesByName("CpuGlassMonitor");
+            if (list.Length == 0) return "无";
+            var sb = new System.Text.StringBuilder();
+            foreach (Process p in list)
+            {
+                string path = "-";
+                try { path = p.MainModule?.FileName ?? "-"; } catch { }
+                sb.AppendLine($"{p.Id} start={p.StartTime:yyyy-MM-dd HH:mm:ss} path={path}");
+            }
+            return sb.ToString().TrimEnd();
+        }
+        catch (Exception ex)
+        {
+            return "ERR: " + ex.Message;
+        }
     }
 
     /// <summary>无界面自检：开机自启的开关/取消是否真的落到系统上（用于自动化验证）。</summary>

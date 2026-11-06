@@ -328,9 +328,23 @@ public sealed class SensorEngine : IDisposable
                 sameAsOurs = string.Equals(file, expected, StringComparison.OrdinalIgnoreCase);
             }
 
-            if (sameAsOurs) return;
+            // 服务指向本程序目录下的同名 .sys，且那个文件真的在 → 状态正常，不动它。
+            // 如果文件不在（换过目录、杀软删过、发布时被覆盖掉），服务就永远起不来，
+            // LibreHardwareMonitor 又会因为"服务已存在"而跳过安装，于是彻底没有 MSR
+            // （温度、频率、电压全空）。这种情况必须把服务删掉，让它重新释放驱动。
+            bool fileExists;
+            try
+            {
+                fileExists = File.Exists(file);
+            }
+            catch
+            {
+                fileExists = false;
+            }
 
-            SettingsStoreShim.Log($"驱动服务指向旧路径，准备重装：image={imagePath} 期望={expected}");
+            if (sameAsOurs && fileExists) return;
+
+            SettingsStoreShim.Log($"驱动服务不可用，准备重装：image={imagePath} 期望={expected} 文件存在={fileExists}");
             RunSc($"stop {serviceName}");
             RunSc($"delete {serviceName}");
         }

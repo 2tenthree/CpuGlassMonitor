@@ -77,14 +77,34 @@ public static class SettingsStore
 
     public static void Log(string message)
     {
+        string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}";
+
+        // 主日志：%APPDATA%\CpuGlassMonitor\app.log
+        if (TryAppend(LogPath, line)) return;
+
+        // 兜底 1：%APPDATA% 写不进去（权限/沙箱/被杀软拦），退到程序目录
+        if (TryAppend(Path.Combine(AppContext.BaseDirectory, "app.log"), line)) return;
+
+        // 兜底 2：程序目录也写不了，退到临时目录
+        TryAppend(Path.Combine(Path.GetTempPath(), "CpuGlassMonitor.log"), line);
+    }
+
+    /// <summary>写一行日志；共享 FileShare.ReadWrite，避免另一个实例正持有文件时整段日志丢失。</summary>
+    private static bool TryAppend(string path, string line)
+    {
         try
         {
-            System.IO.Directory.CreateDirectory(Directory);
-            File.AppendAllText(LogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+            string? folder = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(folder)) System.IO.Directory.CreateDirectory(folder);
+            using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+            using var writer = new StreamWriter(fs, System.Text.Encoding.UTF8);
+            writer.Write(line);
+            writer.Flush();
+            return true;
         }
         catch
         {
-            // 日志失败不影响主流程
+            return false;
         }
     }
 }

@@ -192,6 +192,48 @@ public sealed class TrayController : IDisposable
         }
     }
 
+    /// <summary>把 NotifyIconSettings 里与本程序相关的项摘出来，供诊断报告使用。</summary>
+    public static string DescribeTrayEntries()
+    {
+        var sb = new System.Text.StringBuilder();
+        try
+        {
+            string exe = Environment.ProcessPath ?? "";
+            sb.AppendLine("进程 exe=" + exe);
+            using Microsoft.Win32.RegistryKey? root = Microsoft.Win32.Registry.CurrentUser
+                .OpenSubKey(@"Control Panel\NotifyIconSettings");
+            if (root == null)
+            {
+                sb.AppendLine("打不开 NotifyIconSettings（无条目即表示系统还没为任何图标登记）");
+                return sb.ToString().TrimEnd();
+            }
+
+            int total = 0;
+            foreach (string name in root.GetSubKeyNames())
+            {
+                using Microsoft.Win32.RegistryKey? item = root.OpenSubKey(name);
+                if (item == null) continue;
+                object? pathObj = item.GetValue("ExecutablePath");
+                string path = pathObj as string ?? "-";
+                if (!path.Contains("CpuGlassMonitor", StringComparison.OrdinalIgnoreCase)) continue;
+
+                total++;
+                object? tip = item.GetValue("initialTooltip");
+                object? promoted = item.GetValue("IsPromoted");
+                object? id = item.GetValue("IconSnapshot");
+                sb.AppendLine($"条目 {name}: path={path} tooltip={tip ?? "-"} IsPromoted={promoted ?? "(未设置=隐藏)"} snapshot={(id == null ? "无" : "有")}");
+            }
+
+            if (total == 0) sb.AppendLine("没有找到本程序的托盘图标登记（说明图标可能从未创建成功）");
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine("读取托盘登记失败: " + ex.Message);
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
     /// <summary>
     /// Win11 默认把新图标的托盘项放进"隐藏的图标"浮窗里，用户会以为程序没有图标。
     /// 这里把本程序在 NotifyIconSettings 里的 IsPromoted 置 1（相当于在

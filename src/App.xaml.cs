@@ -17,6 +17,7 @@ public partial class App : Application
     private DispatcherTimer? _driverWatch;
     private int _driverRestarts;
     private bool _diagnosed;
+    private bool _startedByAutostart;
 
     // 用独立配置目录（CPUGLASS_CONFIG_DIR）跑测试实例时，互斥量名也跟着变，
     // 免得测试进程被用户正在用的那个实例挡住。
@@ -67,6 +68,10 @@ public partial class App : Application
         bool autostart = e.Args.Any(a => a.Equals("--autostart", StringComparison.OrdinalIgnoreCase));
         DumpCpuSensors = e.Args.Any(a => a.Equals("--dump-cpu", StringComparison.OrdinalIgnoreCase));
         SettingsStore.Log("启动: " + string.Join(' ', e.Args) + " | exe=" + Environment.ProcessPath);
+
+        // 把"到底有多少权限"记下来：IsInRole(Administrator) 说是管理员、实际却写不了
+        // HKCU 和 %APPDATA% 的情况确实存在（开机自启那次就是这样），只看一个布尔值会误判。
+        foreach (string line in Core.TokenProbe.Describe()) SettingsStore.Log("权限探测: " + line);
 
         if (e.Args.Any(a => a.Equals("--selftest", StringComparison.OrdinalIgnoreCase)))
         {
@@ -194,8 +199,30 @@ public partial class App : Application
                 : CaptureMode.Main);
         }
 
-        // 传感器枚举比较耗时，放到窗口显示之后再做，避免启动白屏
-        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        // 传感器枚举比较耗时，放到窗口显示之后再做，避免启动白屏。
+        // 开机自启时还要先等资源管理器（任务栏）就绪：登录瞬间就启动的话，托盘图标会丢、
+        // 驱动这一轮也可能加载失败，正好对应"开机后没图标 + 读不到 CPU 信息"这两个现象。
+        if (autostart)
+        {
+            _startedByAutostart = true;
+            SettingsStore.Log("自启启动：先等桌面就绪再开传感器");
+            Task.Run(() =>
+            {
+                var clock = Stopwatch.StartNew();
+                bool ready = BootReady.WaitForShell(120, SettingsStore.Log);
+                SettingsStore.Log($"桌面等待结束: ready={ready} 用时={clock.ElapsedMilliseconds}ms shell={BootReady.ShellReady()}");
+            }).ContinueWith(_ => Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(StartEngineAndFinish)));
+        }
+        else
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(StartEngineAndFinish));
+        }
+    }
+
+    /// <summary>打开传感器、补齐配置默认值、启动采样与看门狗。</summary>
+    private void StartEngineAndFinish()
+    {
+        if (Engine != null)
         {
             try
             {
@@ -249,7 +276,54 @@ public partial class App : Application
             Shell?.OnEngineReady();
             Tray?.SyncState();
             StartDriverWatchdog();
-        }));
+        }
+    }
+
+    /// <summary>
+    /// 自启启动且温度始终读不到时，把现场写进程序目录的 boot-diag.txt。
+    /// 开机后用户看不到日志，这份文件是唯一能带出来的证据。
+    /// </summary>
+    private void WriteBootReport()
+    {
+        try
+        {
+            var lines = new List<string>
+            {
+                "CpuGlassMonitor 开机自启诊断",
+                "时间: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                "程序: " + Environment.ProcessPath,
+                "版本: " + typeof(App).Assembly.GetName().Version,
+                "管理员: " + IsElevated,
+                "桌面就绪: " + BootReady.ShellReady(),
+                "",
+                "---- 驱动 ----",
+                SensorEngine.DescribeDriverState(),
+                "",
+                "---- 托盘 ----",
+                TrayController.DescribeTrayEntries(),
+                ""
+            };
+
+            if (Engine != null)
+            {
+                lines.Add("---- 聚合值 ----");
+                lines.Add("cpuTempAvailable=" + Engine.CpuTemperatureAvailable);
+                lines.Add("");
+                lines.Add("---- CPU 传感器 ----");
+                lines.AddRange(Engine.DumpCpuSensors());
+                lines.Add("");
+                lines.Add("---- MSR / 热区 / EC ----");
+                Engine.DumpThermalZone(lines);
+            }
+
+            string path = Path.Combine(AppContext.BaseDirectory, "boot-diag.txt");
+            File.WriteAllText(path, string.Join(Environment.NewLine, lines), System.Text.Encoding.UTF8);
+            SettingsStore.Log("开机自启诊断已写入: " + path);
+        }
+        catch (Exception ex)
+        {
+            SettingsStore.Log("开机自启诊断写入失败: " + ex.Message);
+        }
     }
 
     /// <summary>
@@ -267,8 +341,13 @@ public partial class App : Application
 
         _driverWatch?.Stop();
         _driverRestarts = 0;
-        SettingsStore.Log("驱动看门狗已启动（6 秒后检查 CPU 温度）");
-        _driverWatch = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
+
+        // 自启启动时系统刚开机，服务/驱动子系统可能还在初始化，多给几次机会、间隔也放长。
+        int maxRestarts = _startedByAutostart ? 10 : 2;
+        int intervalSeconds = _startedByAutostart ? 15 : 6;
+
+        SettingsStore.Log($"驱动看门狗已启动（{intervalSeconds} 秒后检查 CPU 温度，最多重载 {maxRestarts} 次，自启={_startedByAutostart}）");
+        _driverWatch = new DispatcherTimer { Interval = TimeSpan.FromSeconds(intervalSeconds) };
         _driverWatch.Tick += (_, _) =>
         {
             if (Engine == null) return;
@@ -297,10 +376,13 @@ public partial class App : Application
                 }
             }
 
-            if (_driverRestarts >= 2)
+            if (_driverRestarts >= maxRestarts)
             {
                 _driverWatch?.Stop();
                 SettingsStore.Log("CPU 温度始终读不到，已放弃自动重载: " + SensorEngine.DescribeDriverState());
+
+                // 自启场景下用户往往看不到日志：留一份报告在程序目录，下次直接取。
+                if (_startedByAutostart) WriteBootReport();
                 return;
             }
 
@@ -316,6 +398,18 @@ public partial class App : Application
                 {
                     bool reset = SensorEngine.TryResetDriverService(out string resetNote);
                     SettingsStore.Log($"重置驱动服务: ok={reset} {resetNote}");
+                }
+
+                // 每次都先试着自己注册/启动驱动服务，并把 sc.exe 的原话记下来：
+                // 开机自启时到底卡在哪一步（没权限？文件没出来？）只能靠它判断。
+                try
+                {
+                    bool installed = SensorEngine.EnsureDriverServiceInstalled(out string installNote);
+                    SettingsStore.Log($"驱动自装: ok={installed} {installNote}");
+                }
+                catch (Exception ex)
+                {
+                    SettingsStore.Log("驱动自装异常: " + ex.Message);
                 }
 
                 bool ok = Engine != null && Engine.RestartHardware(out note);
@@ -906,6 +1000,19 @@ public partial class App : Application
         {
             SettingsStore.Log("提权失败: " + ex.Message);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// 托盘菜单用：以管理员身份重新拉起自己再退出（会弹一次 UAC）。
+    /// 开机自启那次如果拿到的令牌不完整（驱动装不上、温度读不到），
+    /// 用户点这一项就能立刻回到"手动启动"的正常状态，不用重启电脑。
+    /// </summary>
+    public static void RelaunchElevatedNow()
+    {
+        if (TryRelaunchElevated(Environment.GetCommandLineArgs().Skip(1).ToArray()))
+        {
+            ExitCurrent();
         }
     }
 }

@@ -55,6 +55,10 @@ public sealed class SensorEngine : IDisposable
     private bool _ecTemperatureLogged;
     private bool _dtsLogged;
     private bool _msrProbeLogged;
+    private int _frames;
+
+    /// <summary>已采集的帧数（诊断用，判断「还没采到温度」与「真的读不到」）。</summary>
+    public int FrameCount => _frames;
 
     private Computer? _computer;
     private Thread? _worker;
@@ -123,6 +127,13 @@ public sealed class SensorEngine : IDisposable
         SensorReading first = ReadOnce();
         BuildCatalog(first);
         SettingsStoreShim.Log("传感器: " + DescribeDriverState());
+
+        // LHM 自带的驱动安装失败时不会说原因，这里自己再试一次并把 sc.exe 的原话记下来。
+        if (!IntelDtsTemperature.DriverOpen && !FakeTemps)
+        {
+            bool installed = EnsureDriverServiceInstalled(out string note);
+            SettingsStoreShim.Log($"驱动自装: ok={installed} {note}");
+        }
     }
 
     private void CollectHardware(Computer computer)
@@ -358,6 +369,17 @@ public sealed class SensorEngine : IDisposable
     /// <summary>跑一条 sc 命令，吞掉所有异常，只返回退出码。</summary>
     private static int RunSc(string arguments)
     {
+        return RunScCapture(arguments, out _);
+    }
+
+    /// <summary>
+    /// 跑一条 sc 命令并带回输出。开机自启时驱动装不上，唯一能看出原因的就是 sc.exe 自己说的话
+    /// （比如 "拒绝访问 / Access is denied" 说明当前令牌没有管理员写入权，"找不到指定的文件"
+    /// 说明 .sys 没释放出来），所以这里必须把输出留下来写进日志。
+    /// </summary>
+    private static int RunScCapture(string arguments, out string output)
+    {
+        output = "";
         try
         {
             var psi = new ProcessStartInfo("sc.exe", arguments)
@@ -365,18 +387,88 @@ public sealed class SensorEngine : IDisposable
                 CreateNoWindow = true,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
-                RedirectStandardError = true
+                RedirectStandardError = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8
             };
 
             using Process? p = Process.Start(psi);
             if (p == null) return -1;
 
+            string stdout = p.StandardOutput.ReadToEnd();
+            string stderr = p.StandardError.ReadToEnd();
             p.WaitForExit(8000);
+            output = (stdout + " " + stderr).Replace("\r", " ").Replace("\n", " ").Trim();
+            if (output.Length > 200) output = output.Substring(0, 200);
             return p.ExitCode;
+        }
+        catch (Exception ex)
+        {
+            output = "sc.exe 调用失败: " + ex.Message;
+            return -1;
+        }
+    }
+
+    /// <summary>
+    /// 自己动手把 ring0 驱动服务注册好并启动（LHM 的安装失败时不会把原因说清楚）。
+    /// 把 sc.exe 的原始输出一起返回，方便判断是"没权限"还是"文件没出来"。
+    /// </summary>
+    public static bool EnsureDriverServiceInstalled(out string note)
+    {
+        note = "";
+        string exeName = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "CpuGlassMonitor");
+        string serviceName = "R0" + exeName;
+        string sysPath = Path.Combine(AppContext.BaseDirectory, exeName + ".sys");
+
+        if (IntelDtsTemperature.DriverOpen)
+        {
+            note = "ring0 已打开，无需安装";
+            return true;
+        }
+
+        if (!File.Exists(sysPath))
+        {
+            note = "驱动文件不存在: " + sysPath;
+            return false;
+        }
+
+        string? current = ReadServiceImage(serviceName);
+        if (current == null)
+        {
+            int createCode = RunScCapture(
+                $"create {serviceName} type= kernel start= demand binPath= \"\\??\\{sysPath}\" DisplayName= \"CpuGlassMonitor Sensor Driver\"",
+                out string createOut);
+            note = $"create exit={createCode} {createOut}";
+            if (createCode != 0) return false;
+        }
+        else if (!string.Equals(current.Replace(@"\??\", "").Trim(), sysPath, StringComparison.OrdinalIgnoreCase))
+        {
+            RunSc($"stop {serviceName}");
+            RunSc($"delete {serviceName}");
+            int createCode = RunScCapture(
+                $"create {serviceName} type= kernel start= demand binPath= \"\\??\\{sysPath}\" DisplayName= \"CpuGlassMonitor Sensor Driver\"",
+                out string createOut);
+            note = $"重建 create exit={createCode} {createOut}";
+            if (createCode != 0) return false;
+        }
+
+        int startCode = RunScCapture($"start {serviceName}", out string startOut);
+        // 0 = 启动成功；1056 = 服务已在运行；1058 = 已被禁用
+        note = (note.Length > 0 ? note + "; " : "") + $"start exit={startCode} {startOut}";
+        return startCode is 0 or 1056;
+    }
+
+    private static string? ReadServiceImage(string serviceName)
+    {
+        try
+        {
+            using Microsoft.Win32.RegistryKey? key = Microsoft.Win32.Registry.LocalMachine
+                .OpenSubKey(@"SYSTEM\CurrentControlSet\Services\" + serviceName);
+            return key?.GetValue("ImagePath") as string;
         }
         catch
         {
-            return -1;
+            return null;
         }
     }
 
@@ -411,6 +503,7 @@ public sealed class SensorEngine : IDisposable
 
     private SensorReading ReadOnce()
     {
+        _frames++;
         var reading = new SensorReading();
         foreach (IHardware hw in _hardware)
         {
@@ -467,8 +560,9 @@ public sealed class SensorEngine : IDisposable
         }
 
         // 提权了却仍然没有温度：把关键 MSR 的原始值写进日志（只写一次）。
-        // 这一步是为了让"到底哪条 MSR 被拦"变成可读的事实，而不是继续猜。
-        if (!FakeTemps && !_msrProbeLogged && !reading.Get(AggKeys.CpuTempMax).HasValue)
+        // 注意：LHM 在开机/重装驱动后的前几帧温度会是 null（驱动正在初始化），
+        // 所以必须等到跑过若干帧之后仍然没有温度才动这份探针，否则会把正常情况误报成故障。
+        if (!FakeTemps && !_msrProbeLogged && !reading.Get(AggKeys.CpuTempMax).HasValue && _frames > 8)
         {
             _msrProbeLogged = true;
             foreach (string line in IntelDtsTemperature.Probe()) SettingsStoreShim.Log("[MSR] " + line);

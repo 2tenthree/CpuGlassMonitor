@@ -40,6 +40,9 @@ internal static class IntelDtsTemperature
 
     public static string LastStatus { get; private set; } = "未尝试";
 
+    /// <summary>ring0 驱动当前是否已打开（读 MSR 的前提）。</summary>
+    public static bool DriverOpen => IsOpen;
+
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentThread();
 

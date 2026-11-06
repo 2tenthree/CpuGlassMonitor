@@ -5,6 +5,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
+using System.Globalization;
 using System.Windows.Threading;
 using CpuGlassMonitor.Core;
 using CpuGlassMonitor.Interop;
@@ -177,9 +178,32 @@ public partial class MainWindow : Window
         ApplyGlass();
 
         // 排查 CPU 温度读不到时全靠这几行日志
-        SettingsStore.Log($"就绪 elevated={_elevated} cpuTemp={_engine.CpuTemperatureAvailable} " +
-                          $"catalog={_engine.Catalog.Count} rows={_rows.Count} cpu={_engine.CpuName}");
+        SettingsStore.Log($"就绪 elevated={_elevated} catalog={_engine.Catalog.Count} rows={_rows.Count} cpu={_engine.CpuName}");
+        LogFirstSample();
     }
+
+    /// <summary>
+    /// 引擎刚启动时还没有任何一帧数据，此时读 CpuTemperatureAvailable 只能是 false，
+    /// 会被误当成"温度读不到"。所以推迟几秒，等真正采到几帧之后再记一条事实日志。
+    /// </summary>
+    private void LogFirstSample()
+    {
+        var timer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(4)
+        };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            double? temp = _lastReading?.Get(AggKeys.CpuTempMax);
+            SettingsStore.Log($"首帧读数 elevated={_elevated} cpuTemp={_engine.CpuTemperatureAvailable} " +
+                              $"temp={(temp.HasValue ? temp.Value.ToString("F1", CultureInfo.InvariantCulture) + "°C" : "n/a")} " +
+                              $"clock={_lastReading?.Get(AggKeys.CpuClockAvg)?.ToString("F2", CultureInfo.InvariantCulture) ?? "n/a"} " +
+                              $"frames={_engine.FrameCount}");
+        };
+        timer.Start();
+    }
+
 
     /// <summary>调试用：以窗口为锚点打开右键菜单，便于无桌面环境截图校验菜单样式。</summary>
     public void OpenContextMenuForTest()
@@ -451,7 +475,7 @@ public partial class MainWindow : Window
         else if (WantsCpuTemperature() && !HasCpuTemperatureNow())
         {
             hint = _elevated || _engine.CpuTemperatureAvailable
-                ? "未读到 CPU 温度：若开着「内核隔离/内存完整性」或装了 Hyper-V、WSL2，MSR 会被拦住，关掉后重开本程序试试"
+                ? "温度驱动还没就绪，正在自动重试（托盘菜单有「以管理员身份重启」，点一下立刻恢复）"
                 : "受限模式：CPU 温度/频率/电压需要管理员权限";
         }
 

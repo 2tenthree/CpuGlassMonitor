@@ -94,6 +94,7 @@ public sealed class TrayController : IDisposable
         _menu.Items.Add(_horizontalItem);
         _menu.Items.Add(new Forms.ToolStripSeparator());
         _menu.Items.Add(_autoStartItem);
+        _menu.Items.Add(new Forms.ToolStripMenuItem("以管理员身份重启（需确认 UAC）", null, (_, _) => App.RelaunchElevatedNow()));
         _menu.Items.Add(new Forms.ToolStripSeparator());
         _menu.Items.Add(new Forms.ToolStripMenuItem("退出", null, (_, _) => App.ExitCurrent()));
 

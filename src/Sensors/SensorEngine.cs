@@ -54,6 +54,7 @@ public sealed class SensorEngine : IDisposable
     private bool _thermalZoneLogged;
     private bool _ecTemperatureLogged;
     private bool _dtsLogged;
+    private bool _msrProbeLogged;
 
     private Computer? _computer;
     private Thread? _worker;
@@ -463,6 +464,14 @@ public sealed class SensorEngine : IDisposable
                 _dtsLogged = true;
                 SettingsStoreShim.Log($"CPU 温度来源=自读 MSR 0x19C（{IntelDtsTemperature.LastStatus}）");
             }
+        }
+
+        // 提权了却仍然没有温度：把关键 MSR 的原始值写进日志（只写一次）。
+        // 这一步是为了让"到底哪条 MSR 被拦"变成可读的事实，而不是继续猜。
+        if (!FakeTemps && !_msrProbeLogged && !reading.Get(AggKeys.CpuTempMax).HasValue)
+        {
+            _msrProbeLogged = true;
+            foreach (string line in IntelDtsTemperature.Probe()) SettingsStoreShim.Log("[MSR] " + line);
         }
 
         // CPU 温度兜底 2：ACPI 热区（粗一点，很多笔记本根本不支持）。
@@ -1095,6 +1104,9 @@ public sealed class SensorEngine : IDisposable
         lines.Add(_thermalZone.Describe());
         lines.Add("LenovoEC: " + _ecTemperature.Status);
         IntelDtsTemperature.Describe(lines);
+        lines.Add("");
+        lines.Add("---- 关键 MSR 原始值 ----");
+        foreach (string line in IntelDtsTemperature.Probe()) lines.Add(line);
     }
 
     private static bool IsAdvanced(ISensor sensor)

@@ -108,9 +108,10 @@ public sealed class TrayController : IDisposable
         // 收到就重新挂一次图标。
         AttachTaskbarListener();
 
-        // 兜底：登录后前 90 秒每 10 秒重新确认一次（启动早于托盘区时用），
+        // 兜底：前 5 分钟每 10 秒重新确认一次（30 次）。
+        // 开机自启时资源管理器可能比我们晚很久才把托盘区建好，早期只保活 90 秒不够；
         // 只要图标真的在就不会有任何副作用，链路断了才会被这套重试救回来。
-        _reattachLeft = 9;
+        _reattachLeft = 30;
         _retry = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _retry.Tick += (_, _) =>
         {
@@ -118,6 +119,7 @@ public sealed class TrayController : IDisposable
             if (_reattachLeft <= 0)
             {
                 _retry?.Stop();
+                if (!_notifyIcon.Visible) SettingsStore.Log("托盘保活结束，图标仍不可见（可能是系统设置里把它折叠了）");
                 return;
             }
 
@@ -165,9 +167,14 @@ public sealed class TrayController : IDisposable
     {
         try
         {
+            bool hadIcon = _notifyIcon.Icon is not null;
             _notifyIcon.Visible = false;
             _notifyIcon.Visible = true;
-            if (!quiet) SettingsStore.Log("托盘图标已重新挂载（" + reason + "）");
+            if (!quiet)
+            {
+                SettingsStore.Log($"托盘图标已重新挂载（{reason}）icon={(hadIcon ? "有" : "空")} visible={_notifyIcon.Visible} 桌面={BootReady.ShellReady()}");
+            }
+
             TryPromoteInTray();
         }
         catch (Exception ex)

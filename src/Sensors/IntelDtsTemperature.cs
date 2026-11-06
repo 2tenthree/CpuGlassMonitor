@@ -18,8 +18,10 @@ namespace CpuGlassMonitor.Sensors;
 /// </summary>
 internal static class IntelDtsTemperature
 {
-    private const uint MsrTemperatureTarget = 0x1A2; // IA32_TEMPERATURE_TARGET
-    private const uint MsrThermStatus = 0x19C;       // IA32_THERM_STATUS
+    private const uint MsrTemperatureTarget = 0x1A2; // IA32_TEMPERATURE_TARGET（TjMax 在里面）
+    private const uint MsrThermStatus = 0x19C;       // IA32_THERM_STATUS（每核 DTS）
+    private const uint MsrPackageTherm = 0x1B1;      // IA32_PACKAGE_THERM_STATUS（封装 DTS）
+    private const uint MsrPerfStatus = 0x198;        // IA32_PERF_STATUS（用来确认 ring0 到底通不通）
 
     private static readonly Type? Ring0Type =
         typeof(Computer).Assembly.GetType("LibreHardwareMonitor.Hardware.Ring0");
@@ -132,7 +134,21 @@ internal static class IntelDtsTemperature
 
         if (n == 0)
         {
-            LastStatus = $"0x19C 读不到（TjMax={tjMax}）";
+            // 每核 0x19C 都读不到时，再试"整包"温度（0x1B1），够用就行
+            if (ReadMsr(MsrPackageTherm, out uint pkg) && (pkg & 0x80000000u) == 0)
+            {
+                int pkgDts = (int)((pkg >> 16) & 0x7F);
+                double pkgTemp = tjMax - pkgDts;
+                if (pkgTemp >= 1 && pkgTemp <= 130)
+                {
+                    max = pkgTemp;
+                    average = pkgTemp;
+                    LastStatus = $"ok 封装温度 TjMax={tjMax}";
+                    return true;
+                }
+            }
+
+            LastStatus = $"0x19C/0x1B1 都读不到（TjMax={tjMax}，ring0=open）";
             return false;
         }
 
@@ -140,6 +156,56 @@ internal static class IntelDtsTemperature
         average = sum / n;
         LastStatus = $"ok 核心数={n} TjMax={tjMax}";
         return true;
+    }
+
+    /// <summary>
+    /// 诊断用：把几个关键 MSR 的原始值一次性抓出来。
+    /// 有了这几行就能判断"到底哪一步被系统拦掉了"，不用再靠猜。
+    /// </summary>
+    public static List<string> Probe()
+    {
+        var lines = new List<string>
+        {
+            $"IntelDTS 类型={(Ring0Type?.FullName ?? "未找到")} ReadMsr={(ReadMsrMethod is null ? "未找到" : "有")} ring0={(IsOpen ? "open" : "closed")}"
+        };
+
+        if (!IsOpen)
+        {
+            lines.Add("  ring0 未打开，MSR 全部不可读（说明驱动没装上或没提权）");
+            return lines;
+        }
+
+        foreach (uint msr in new[] { MsrTemperatureTarget, MsrPackageTherm, MsrPerfStatus })
+        {
+            lines.Add(ReadMsr(msr, out uint value)
+                ? $"  MSR 0x{msr:X} = 0x{value:X8}（bit31={(value >> 31) & 1} readout=0x{(value >> 16) & 0x7F:X2}）"
+                : $"  MSR 0x{msr:X} 读取失败");
+        }
+
+        IntPtr thread = GetCurrentThread();
+        IntPtr previous = SetThreadAffinityMask(thread, new IntPtr(1));
+        try
+        {
+            foreach (int i in new[] { 0, 1, 2 })
+            {
+                if (SetThreadAffinityMask(thread, new IntPtr(1L << i)) == IntPtr.Zero)
+                {
+                    lines.Add($"  0x19C@CPU{i} 亲和性设置失败（逻辑处理器 {i} 不可用）");
+                    continue;
+                }
+
+                lines.Add(ReadMsr(MsrThermStatus, out uint eax)
+                    ? $"  0x19C@CPU{i} = 0x{eax:X8}（bit31={(eax >> 31) & 1} readout=0x{(eax >> 16) & 0x7F:X2}）"
+                    : $"  0x19C@CPU{i} 读取失败");
+            }
+        }
+        finally
+        {
+            if (previous != IntPtr.Zero) SetThreadAffinityMask(thread, previous);
+        }
+
+        lines.Add($"  ProcessorCount={Environment.ProcessorCount} LastTjMax={LastTjMax} LastStatus={LastStatus}");
+        return lines;
     }
 
     /// <summary>诊断用：把原始 MSR 读数写进日志行。</summary>

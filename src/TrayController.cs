@@ -207,8 +207,13 @@ public sealed class TrayController : IDisposable
             using Microsoft.Win32.RegistryKey? root = Microsoft.Win32.Registry.CurrentUser
                 .OpenSubKey(@"Control Panel\NotifyIconSettings", writable: true);
 
-            if (root == null) return;
+            if (root == null)
+            {
+                SettingsStore.Log("托盘常显：打不开 NotifyIconSettings（只读？）");
+                return;
+            }
 
+            bool found = false;
             foreach (string name in root.GetSubKeyNames())
             {
                 using Microsoft.Win32.RegistryKey? item = root.OpenSubKey(name, writable: true);
@@ -216,12 +221,17 @@ public sealed class TrayController : IDisposable
 
                 if (item.GetValue("ExecutablePath") is not string path) continue;
                 if (!string.Equals(path, exe, StringComparison.OrdinalIgnoreCase)) continue;
+
+                found = true;
                 if (item.GetValue("IsPromoted") is int promoted && promoted == 1) return;
 
                 item.SetValue("IsPromoted", 1, Microsoft.Win32.RegistryValueKind.DWord);
-                SettingsStore.Log("已把托盘图标设为常显（IsPromoted=1）");
+                SettingsStore.Log("已把托盘图标设为常显（IsPromoted=1）: " + name);
                 return;
             }
+
+            // 图标项还没被系统登记（刚启动时常见），下次重挂再试即可
+            if (!found) SettingsStore.Log("托盘常显：系统里还没有本程序的图标项，稍后重试");
         }
         catch (Exception ex)
         {

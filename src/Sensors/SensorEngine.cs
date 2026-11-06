@@ -50,7 +50,10 @@ public sealed class SensorEngine : IDisposable
     private readonly List<(string Key, Func<SensorReading, double?> Compute)> _aggregates = new();
     private readonly NetworkSampler _network = new();
     private readonly ThermalZone _thermalZone = new();
+    private readonly LenovoEcTemperature _ecTemperature = new();
     private bool _thermalZoneLogged;
+    private bool _ecTemperatureLogged;
+    private bool _dtsLogged;
 
     private Computer? _computer;
     private Thread? _worker;
@@ -308,12 +311,24 @@ public sealed class SensorEngine : IDisposable
             if (string.IsNullOrWhiteSpace(imagePath)) return;
 
             string file = imagePath.Replace(@"\??\", "").Trim();
-            bool sameAsOurs = string.Equals(
-                Path.GetFullPath(file),
-                Path.GetFullPath(expected),
-                StringComparison.OrdinalIgnoreCase);
 
-            if (sameAsOurs && File.Exists(expected)) return;
+            // 只要服务指向的就是「本程序目录下的同名 .sys」就不动它。
+            // 注意不能额外要求 File.Exists：首次运行时 LHM 还没把 .sys 释放出来，
+            // 那样会误判成"旧路径"，每次启动都白删一遍服务。
+            bool sameAsOurs;
+            try
+            {
+                sameAsOurs = string.Equals(
+                    Path.GetFullPath(file),
+                    Path.GetFullPath(expected),
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                sameAsOurs = string.Equals(file, expected, StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (sameAsOurs) return;
 
             SettingsStoreShim.Log($"驱动服务指向旧路径，准备重装：image={imagePath} 期望={expected}");
             RunSc($"stop {serviceName}");
@@ -421,8 +436,22 @@ public sealed class SensorEngine : IDisposable
         reading.Values[AggKeys.NetDown] = _network.DownBytesPerSecond;
         reading.Values[AggKeys.NetUp] = _network.UpBytesPerSecond;
 
-        // CPU 温度兜底：LHM 读不到（VBS/内核隔离拦住了 MSR）就退到 ACPI 热区，
-        // 粗一点但至少能看出热不热。
+        // CPU 温度兜底 1：自己读 Intel DTS（MSR 0x19C）。
+        // LHM 的 Intel 温度要先读 MSR 0x1A2 拿 TjMax，那一步在开了 VBS 的机器上常失败，
+        // 于是所有核心温度都是 null；这里绕开它，TjMax 读不到就按 100°C 算。
+        if (!FakeTemps && !reading.Get(AggKeys.CpuTempMax).HasValue &&
+            IntelDtsTemperature.TryRead(out double dtsMax, out double dtsAvg))
+        {
+            reading.Values[AggKeys.CpuTempMax] = dtsMax;
+            reading.Values[AggKeys.CpuTempAvg] = dtsAvg;
+            if (!_dtsLogged)
+            {
+                _dtsLogged = true;
+                SettingsStoreShim.Log($"CPU 温度来源=自读 MSR 0x19C（{IntelDtsTemperature.LastStatus}）");
+            }
+        }
+
+        // CPU 温度兜底 2：ACPI 热区（粗一点，很多笔记本根本不支持）。
         if (!FakeTemps && !reading.Get(AggKeys.CpuTempMax).HasValue)
         {
             double? zone = _thermalZone.Read();
@@ -434,6 +463,24 @@ public sealed class SensorEngine : IDisposable
                 {
                     _thermalZoneLogged = true;
                     SettingsStoreShim.Log("CPU 温度来源=ACPI 热区（LHM 读不到 MSR，可能是内核隔离/VBS 拦住）");
+                }
+            }
+        }
+
+        // CPU 温度兜底 2：联想 EC（root\WMI:LENOVO_GAMEZONE_DATA.GetCPUTemp）。
+        // 开了 VBS / 内存完整性后 Intel DTS 的 MSR 会被拦，LHM 拿不到温度，
+        // 这时走联想电脑管家用的那条 EC 接口仍然是准的。
+        if (!FakeTemps && !reading.Get(AggKeys.CpuTempMax).HasValue)
+        {
+            double? ec = _ecTemperature.Read();
+            if (ec.HasValue)
+            {
+                reading.Values[AggKeys.CpuTempMax] = ec.Value;
+                reading.Values[AggKeys.CpuTempAvg] = ec.Value;
+                if (!_ecTemperatureLogged)
+                {
+                    _ecTemperatureLogged = true;
+                    SettingsStoreShim.Log("CPU 温度来源=联想 EC（LHM 读不到 MSR)");
                 }
             }
         }
@@ -1029,7 +1076,12 @@ public sealed class SensorEngine : IDisposable
     }
 
     /// <summary>诊断用：把 ACPI 热区的查询结果写进行。</summary>
-    public void DumpThermalZone(List<string> lines) => lines.Add(_thermalZone.Describe());
+    public void DumpThermalZone(List<string> lines)
+    {
+        lines.Add(_thermalZone.Describe());
+        lines.Add("LenovoEC: " + _ecTemperature.Status);
+        IntelDtsTemperature.Describe(lines);
+    }
 
     private static bool IsAdvanced(ISensor sensor)
     {

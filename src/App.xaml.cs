@@ -16,6 +16,7 @@ public partial class App : Application
     private Mutex? _mutex;
     private DispatcherTimer? _driverWatch;
     private int _driverRestarts;
+    private bool _diagnosed;
 
     // 用独立配置目录（CPUGLASS_CONFIG_DIR）跑测试实例时，互斥量名也跟着变，
     // 免得测试进程被用户正在用的那个实例挡住。
@@ -267,6 +268,24 @@ public partial class App : Application
                 return;
             }
 
+            // 第一次发现没温度时，把 CPU 传感器全量打一遍，方便事后看日志定位
+            // （是传感器没建出来、还是建了读不到、还是被 VBS 拦了）。
+            if (!_diagnosed)
+            {
+                _diagnosed = true;
+                try
+                {
+                    var lines = new List<string> { "---- 温度缺失诊断 ----", SensorEngine.DescribeDriverState() };
+                    foreach (string line in Engine.DumpCpuSensors()) lines.Add(line);
+                    Engine.DumpThermalZone(lines);
+                    foreach (string line in lines) SettingsStore.Log(line);
+                }
+                catch (Exception ex)
+                {
+                    SettingsStore.Log("温度诊断失败: " + ex.Message);
+                }
+            }
+
             if (_driverRestarts >= 2)
             {
                 _driverWatch?.Stop();
@@ -321,6 +340,14 @@ public partial class App : Application
                 {
                     AutoStart.EnsureTargetsCurrentExe(out _);
                     AutoStart.EnsureElevatedAutostart(IsElevated, out _);
+                    registered = AutoStart.IsRegistered;
+                }
+                else if (Settings.WithWindows && IsElevated)
+                {
+                    // 配置里说「要自启」但系统里没了（被手动删过、或上次只写了配置）：
+                    // 现在自己是管理员，直接补注册一次，别把用户的设置默默改回"不开自启"。
+                    bool ok = AutoStart.Enable(out string message);
+                    SettingsStore.Log($"开机自启：系统里没有但配置要求自启，已重新注册: ok={ok} {message}");
                     registered = AutoStart.IsRegistered;
                 }
             }

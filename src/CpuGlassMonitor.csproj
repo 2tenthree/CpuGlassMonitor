@@ -17,7 +17,7 @@
     <SelfContained>false</SelfContained>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <NoWarn>$(NoWarn);CA1416;WFO1000</NoWarn>
-    <Version>1.2.7</Version>
+    <Version>1.2.8</Version>
     <Product>CpuGlassMonitor</Product>
     <Company>CpuGlassMonitor</Company>
     <AssemblyTitle>CPU 玻璃监控</AssemblyTitle>

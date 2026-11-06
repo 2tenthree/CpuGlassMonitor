@@ -117,7 +117,10 @@ internal static class IntelDtsTemperature
                 if (SetThreadAffinityMask(thread, new IntPtr(1L << i)) == IntPtr.Zero) continue;
                 if (!ReadMsr(MsrThermStatus, out uint eax)) continue;
 
-                if ((eax & 0x80000000u) != 0) continue; // 这一核没报有效值
+                // IA32_THERM_STATUS：bit31 = Reading Valid（1 才有效！），bits 22:16 = Digital Readout。
+                // 早期版本这里判反了（把 1 当成无效），结果读到了值也照样被丢掉，温度永远为空。
+                if ((eax & 0x80000000u) == 0) continue;
+
                 int dts = (int)((eax >> 16) & 0x7F);
                 double temp = tjMax - dts;
                 if (temp < 1 || temp > 130) continue;
@@ -135,7 +138,7 @@ internal static class IntelDtsTemperature
         if (n == 0)
         {
             // 每核 0x19C 都读不到时，再试"整包"温度（0x1B1），够用就行
-            if (ReadMsr(MsrPackageTherm, out uint pkg) && (pkg & 0x80000000u) == 0)
+            if (ReadMsr(MsrPackageTherm, out uint pkg) && (pkg & 0x80000000u) != 0)
             {
                 int pkgDts = (int)((pkg >> 16) & 0x7F);
                 double pkgTemp = tjMax - pkgDts;
@@ -178,7 +181,7 @@ internal static class IntelDtsTemperature
         foreach (uint msr in new[] { MsrTemperatureTarget, MsrPackageTherm, MsrPerfStatus })
         {
             lines.Add(ReadMsr(msr, out uint value)
-                ? $"  MSR 0x{msr:X} = 0x{value:X8}（bit31={(value >> 31) & 1} readout=0x{(value >> 16) & 0x7F:X2}）"
+                ? $"  MSR 0x{msr:X} = 0x{value:X8}（有效={(value >> 31) & 1} readout={(value >> 16) & 0x7F}）"
                 : $"  MSR 0x{msr:X} 读取失败");
         }
 
@@ -195,7 +198,7 @@ internal static class IntelDtsTemperature
                 }
 
                 lines.Add(ReadMsr(MsrThermStatus, out uint eax)
-                    ? $"  0x19C@CPU{i} = 0x{eax:X8}（bit31={(eax >> 31) & 1} readout=0x{(eax >> 16) & 0x7F:X2}）"
+                    ? $"  0x19C@CPU{i} = 0x{eax:X8}（有效={(eax >> 31) & 1} readout={(eax >> 16) & 0x7F} 温度≈{LastTjMax - (int)((eax >> 16) & 0x7F)}）"
                     : $"  0x19C@CPU{i} 读取失败");
             }
         }

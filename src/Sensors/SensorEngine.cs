@@ -94,6 +94,11 @@ public sealed class SensorEngine : IDisposable
 
     public void Open()
     {
+        // 先把驱动文件补回来，再检查服务：服务注册项还在、但 .sys 被清理/覆盖掉时，
+        // LHM 会因为「服务已存在」跳过安装（也就不释放 .sys），而 sc start 又指向不存在的文件，
+        // 于是这一轮、以及之后每一次重载都开不了 ring0，CPU 温度/频率/电压永远是空的。
+        EnsureDriverFile();
+
         // 换过 exe 目录（比如从 src\bin 换到 dist）之后，旧的服务还指着已经删掉的 .sys，
         // LHM 看到"服务已存在"就跳过安装、直接启动，于是永远读不到 MSR。
         // 这里在 Open 之前先把这个过期服务清掉，让 LHM 用当前目录重新装一份。
@@ -258,7 +263,6 @@ public sealed class SensorEngine : IDisposable
         {
             string exeName = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "CpuGlassMonitor");
             string serviceName = "R0" + exeName;
-            string sysPath = Path.Combine(AppContext.BaseDirectory, exeName + ".sys");
 
             var psi = new ProcessStartInfo("sc.exe", $"delete {serviceName}")
             {
@@ -277,15 +281,10 @@ public sealed class SensorEngine : IDisposable
 
             p.WaitForExit(8000);
 
-            try
-            {
-                if (File.Exists(sysPath)) File.Delete(sysPath);
-            }
-            catch
-            {
-                // 文件被占用就留着，下次 Open 会覆盖
-            }
-
+            // 这里绝对不能顺手删掉 .sys：删服务本身在权限不足时会失败（sc 退出码 5），
+            // 文件却没了，于是服务注册项指向一个不存在的文件，LHM 又因为「服务已存在」
+            // 不再释放驱动 —— 这正是开机自启反复重载 10 次也读不到 CPU 参数的死锁。
+            // 文件由 EnsureDriverFile 负责补齐，删除服务只为了让 LHM 重装。
             note = $"已删除驱动服务 {serviceName}（exit={p.ExitCode}）";
             return p.ExitCode == 0;
         }
@@ -294,6 +293,120 @@ public sealed class SensorEngine : IDisposable
             note = "重置驱动服务失败: " + ex.Message;
             return false;
         }
+    }
+
+    private static bool _driverExtractWarned;
+
+    /// <summary>本程序目录下 LHM 释放出来的内核驱动文件。</summary>
+    private static string DriverFilePath => Path.Combine(
+        AppContext.BaseDirectory,
+        Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "CpuGlassMonitor") + ".sys");
+
+    /// <summary>
+    /// 保证 .sys 存在：从 LibreHardwareMonitorLib 内嵌的驱动资源里补回程序目录。
+    ///
+    /// 这一步不需要服务控制管理器权限，只要程序目录可写就能做（实测低完整性令牌下也成立）。
+    /// 服务注册项指向的正是这个文件，文件补回来后 sc start / LHM 的 Ring0.Open 才有得启动。
+    /// 释放失败时不写垃圾文件：只接受 MZ 开头、大小合理的 PE 映像，其余交给 LHM 自己处理。
+    /// </summary>
+    private static void EnsureDriverFile()
+    {
+        if (File.Exists(DriverFilePath)) return;
+
+        try
+        {
+            System.Reflection.Assembly assembly = typeof(Computer).Assembly;
+            string[] names = assembly.GetManifestResourceNames();
+            byte[]? driver = null;
+            string? used = null;
+
+            // 这个版本的 LHM 把驱动压成 .gz 内嵌（LibreHardwareMonitor.Resources.WinRing0x64.gz）。
+            // x64 驱动优先，别把 WinRing0（32 位）或 inpoutx64 写进 .sys。
+            IEnumerable<string> ordered = names
+                .Where(n => n.Contains("WinRing0x64", StringComparison.OrdinalIgnoreCase))
+                .Concat(names.Where(n => n.Contains("Ring0", StringComparison.OrdinalIgnoreCase)
+                                         && n.Contains("x64", StringComparison.OrdinalIgnoreCase)))
+                .Concat(names.Where(n => n.Contains("Ring0", StringComparison.OrdinalIgnoreCase)
+                                         || n.EndsWith(".sys", StringComparison.OrdinalIgnoreCase)))
+                .Concat(names);
+
+            foreach (string name in ordered)
+            {
+                if (!TryReadDriverResource(assembly, name, out byte[]? bytes)) continue;
+                driver = bytes;
+                used = name;
+                break;
+            }
+
+            if (driver is null)
+            {
+                WarnOnce("驱动自愈：LHM 程序集里没找到可用的 .sys 资源，交给 LHM 自己释放");
+                return;
+            }
+
+            File.WriteAllBytes(DriverFilePath, driver);
+            SettingsStoreShim.Log($"驱动自愈：已补回 {Path.GetFileName(DriverFilePath)}（{driver.Length} 字节，资源={used}）");
+        }
+        catch (Exception ex)
+        {
+            WarnOnce("驱动自愈失败: " + ex.Message);
+        }
+    }
+
+    private static bool TryReadDriverResource(System.Reflection.Assembly assembly, string name, out byte[]? bytes)
+    {
+        bytes = null;
+        try
+        {
+            using Stream? stream = assembly.GetManifestResourceStream(name);
+            if (stream is null) return false;
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            byte[] data = buffer.ToArray();
+
+            // LHM 把 .sys 用 gzip 压进资源（...WinRing0x64.gz），必须先解压再判 PE 头；
+            // 否则会误以为"程序集里没有驱动资源"，把最关键的补文件步骤跳过去。
+            if (name.EndsWith(".gz", StringComparison.OrdinalIgnoreCase)
+                || (data.Length > 2 && data[0] == 0x1F && data[1] == 0x8B))
+            {
+                // LHM 在 gzip 流前面塞了一个 0xFF 版本字节（实测资源头是 FF 1F 8B 08），
+            // 从偏移 0 直接解压会报 "unsupported compression method"，必须先找到 gzip 魔数。
+            int offset = 0;
+            for (int i = 0; i < Math.Min(8, data.Length - 1); i++)
+            {
+                if (data[i] == 0x1F && data[i + 1] == 0x8B)
+                {
+                    offset = i;
+                    break;
+                }
+            }
+
+            using var packed = new MemoryStream(data, offset, data.Length - offset);
+                using var gzip = new System.IO.Compression.GZipStream(
+                    packed, System.IO.Compression.CompressionMode.Decompress);
+                using var unpacked = new MemoryStream();
+                gzip.CopyTo(unpacked);
+                data = unpacked.ToArray();
+            }
+
+            // 内核驱动是 PE 文件；把图标/文本之类的资源误写成 .sys 只会更糟
+            if (data.Length is < 2 * 1024 or > 2 * 1024 * 1024) return false;
+            if (data[0] != (byte)'M' || data[1] != (byte)'Z') return false;
+
+            bytes = data;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void WarnOnce(string message)
+    {
+        if (_driverExtractWarned) return;
+        _driverExtractWarned = true;
+        SettingsStoreShim.Log(message);
     }
 
     /// <summary>
@@ -357,8 +470,11 @@ public sealed class SensorEngine : IDisposable
             if (sameAsOurs && fileExists) return;
 
             SettingsStoreShim.Log($"驱动服务不可用，准备重装：image={imagePath} 期望={expected} 文件存在={fileExists}");
-            RunSc($"stop {serviceName}");
-            RunSc($"delete {serviceName}");
+            int stopCode = RunScCapture($"stop {serviceName}", out string stopOut);
+            int deleteCode = RunScCapture($"delete {serviceName}", out string deleteOut);
+            // 以前这里把 sc.exe 的输出吞了，日志里只看得到「服务还在」，看不到退出码 5（拒绝访问）。
+            // 把原话留下来，才能区分「令牌不完整」和「驱动文件真丢了」。
+            SettingsStoreShim.Log($"重置驱动服务: stop exit={stopCode} {stopOut} | delete exit={deleteCode} {deleteOut}");
         }
         catch (Exception ex)
         {
@@ -425,6 +541,9 @@ public sealed class SensorEngine : IDisposable
             note = "ring0 已打开，无需安装";
             return true;
         }
+
+        // 看门狗这条路径不经过 Open()，也得先把 .sys 补回来，否则下面只会报「驱动文件不存在」
+        EnsureDriverFile();
 
         if (!File.Exists(sysPath))
         {

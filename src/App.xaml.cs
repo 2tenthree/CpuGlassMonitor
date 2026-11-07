@@ -69,9 +69,11 @@ public partial class App : Application
         DumpCpuSensors = e.Args.Any(a => a.Equals("--dump-cpu", StringComparison.OrdinalIgnoreCase));
         SettingsStore.Log("启动: " + string.Join(' ', e.Args) + " | exe=" + Environment.ProcessPath);
 
-        // 把"到底有多少权限"记下来：IsInRole(Administrator) 说是管理员、实际却写不了
-        // HKCU 和 %APPDATA% 的情况确实存在（开机自启那次就是这样），只看一个布尔值会误判。
-        foreach (string line in Core.TokenProbe.Describe()) SettingsStore.Log("权限探测: " + line);
+        // 把「到底有多少权限」实测一遍：IsInRole(Administrator) 说是管理员、实际却是
+        // 低完整性令牌（写不了 HKCU / %APPDATA% / HKLM）的情况确实存在，开机自启那次就是这样。
+        // 后面的 IsElevated 一律以这次实测为准，不再用单独一个布尔值误判。
+        var privileges = Core.TokenProbe.Probe();
+        foreach (string line in Core.TokenProbe.Describe(privileges)) SettingsStore.Log("权限探测: " + line);
 
         if (e.Args.Any(a => a.Equals("--selftest", StringComparison.OrdinalIgnoreCase)))
         {
@@ -125,7 +127,16 @@ public partial class App : Application
         }
 
         Settings = SettingsStore.Load();
-        IsElevated = CheckElevated();
+        // 用实测结果，不用 IsInRole：自启那次带着管理员 SID，却是低完整性令牌，
+        // 结果驱动装不上、托盘图标写不进 HKCU、配置也存不下。
+        IsElevated = privileges.Usable;
+        SettingsStore.Log($"启动权限判定: usable={IsElevated} {privileges.FailureReason}");
+
+        // 文件本身的强制完整性标签会压低进程 IL：计划任务给的最高权限令牌也挡不住。
+        // 这个信息必须和令牌探测一起看，否则会把「文件标签」误当成「任务没提权」。
+        string imageLabel = Core.ImageLabel.Describe();
+        SettingsStore.Log($"exe 强制完整性标签={imageLabel} 路径={Environment.ProcessPath}");
+        if (imageLabel == "低") SettingsStore.Log("文件标签告警: " + Core.ImageLabel.Conclusion(imageLabel));
 
         // 如果用户给这个 exe 勾过「属性 → 兼容性 → 以管理员身份运行此程序」，
         // 那么开机自启（注册表 Run / 计划任务）会在登录瞬间被 UAC 拦住而静默失败，
@@ -133,23 +144,47 @@ public partial class App : Application
         // 让提权由程序自己控制（runas 一次，或计划任务 /RL HIGHEST）。
         TryClearRunAsAdminLayer();
 
-        // 读取 CPU 温度/频率/电压需要管理员权限，因此自动以管理员身份重启自身。
-        // 例外：开机自启时不要再弹 UAC（登录瞬间没人点确认，弹出来也会被拒），
-        // 自启应该由「最高权限计划任务」直接带管理员身份启动，见 AutoStart.EnsureElevatedAutostart。
+        // 读取 CPU 温度/频率/电压需要 ring0 驱动，因此令牌不完整时自动以管理员身份重启自身。
+        // 这里不再给「开机自启」开豁免：计划任务写着 HighestAvailable 并不代表令牌真的可用
+        // （实测出现过「管理员 SID + 低完整性级别」，连 HKCU 都写不了，驱动和托盘全废）。
+        // 缺权限时走的就是「用户双击 → UAC 提权」这条已验证有效的路径。
+        // 令牌已经是「Full 已提升」却仍是低 IL：Windows 认为它不需要再提权，
+        // ShellExecute(runas) 不会弹 UAC，只会用同一个低 IL 令牌再启动一个自己。
+        // 再加上 exe 带低完整性标签，重启多少次都还是低 IL —— 这条路径必须跳过，
+        // 否则日志里会出现误导性的「提权后令牌仍不完整」。
+        bool fakeElevation = privileges.ElevationType == 2
+                             && privileges.IntegrityRid < Core.TokenProbe.IntegrityHigh
+                             && imageLabel == "低";
         bool relaunched = e.Args.Any(a => a.Equals("--elevated", StringComparison.OrdinalIgnoreCase));
-        if (!IsElevated && autostart)
+        if (!IsElevated && !relaunched && Settings.AskElevation && !NoElevate && !fakeElevation)
         {
-            SettingsStore.Log("自启启动但未提权：计划任务可能不是最高权限，本次以受限模式运行。");
-        }
-        else if (!IsElevated && Settings.AskElevation && !NoElevate && !relaunched)
-        {
+            SettingsStore.Log(autostart
+                ? $"开机自启进程令牌不完整（{privileges.FailureReason}），改用与手动启动相同的完整管理员令牌重启。"
+                : $"当前令牌不完整（{privileges.FailureReason}），请求管理员权限提升。");
+
             if (TryRelaunchElevated(e.Args))
             {
                 Shutdown(0);
                 return;
             }
 
-            SettingsStore.Log("用户取消了管理员权限提升，以降级模式运行。");
+            SettingsStore.Log("管理员权限提升未完成（UAC 被取消或失败），以降级模式运行。");
+        }
+        else if (!IsElevated && fakeElevation && !relaunched)
+        {
+            SettingsStore.Log("提权重启已跳过：令牌是「已提升」但 exe 的低完整性标签把 IL 压到了「低」，"
+                + "runas 不会再弹 UAC，重启只会得到同样的低 IL 进程。"
+                + Core.ImageLabel.Conclusion(imageLabel));
+        }
+        else if (!IsElevated && relaunched)
+        {
+            // 已经提权重启过一次还是不行：别再循环弹 UAC，把原因留下来供排障
+            SettingsStore.Log($"提权后令牌仍不完整（{privileges.FailureReason}），不再重复提权，本次以降级模式运行。"
+                + " 文件标签=" + imageLabel + "；" + Core.ImageLabel.Conclusion(imageLabel));
+        }
+        else if (!IsElevated)
+        {
+            SettingsStore.Log($"令牌不完整（{privileges.FailureReason}），设置里关掉了自动提权，以降级模式运行。");
         }
 
         DispatcherUnhandledException += OnDispatcherUnhandledException;
@@ -287,6 +322,10 @@ public partial class App : Application
             Shell?.OnEngineReady();
             Tray?.SyncState();
             StartDriverWatchdog();
+
+            // 令牌不完整的自启实例不会启动驱动看门狗（没权限重启也没意义），
+            // 结果反而是最需要排障的那次没有 boot-diag.txt。这里补写一份。
+            if (!IsElevated && _startedByAutostart) WriteBootReport();
         }
     }
 
@@ -304,7 +343,13 @@ public partial class App : Application
                 "时间: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
                 "程序: " + Environment.ProcessPath,
                 "版本: " + typeof(App).Assembly.GetName().Version,
-                "管理员: " + IsElevated,
+                "管理员(实测可用): " + IsElevated,
+                "令牌诊断: " + Core.TokenProbe.Probe().FailureReason,
+                "完整性级别: " + Core.TokenProbe.Probe().IntegrityName,
+                "exe 强制完整性标签: " + Core.ImageLabel.Describe(),
+                "文件标签结论: " + Core.ImageLabel.Conclusion(Core.ImageLabel.Describe()),
+                "建议安装目录: " + Core.ImageLabel.SafeDirectory,
+                "计划任务: " + Core.AutoStart.Describe().Replace(Environment.NewLine, " | "),
                 "桌面就绪: " + BootReady.ShellReady(),
                 "",
                 "---- 驱动 ----",
@@ -623,8 +668,8 @@ public partial class App : Application
         var lines = new List<string>();
         try
         {
-            IsElevated = CheckElevated();
-            lines.Add("elevated=" + IsElevated);
+            IsElevated = Core.TokenProbe.Probe().Usable;
+            lines.Add("elevated(令牌可用)=" + IsElevated);
             Settings = SettingsStore.Load();
 
             Engine = new SensorEngine()
@@ -691,7 +736,9 @@ public partial class App : Application
             lines.Add("版本: " + typeof(App).Assembly.GetName().Version);
             lines.Add("系统: " + Environment.OSVersion.VersionString + " (build " + Environment.OSVersion.Version.Build + ")");
             lines.Add("64 位进程: " + Environment.Is64BitProcess);
-            lines.Add("管理员: " + CheckElevated());
+            var probe = Core.TokenProbe.Probe();
+            lines.Add("IsInRole(管理员)=" + CheckElevated() + " 令牌实测可用=" + probe.Usable
+                      + " 完整性级别=" + probe.IntegrityName + " 原因=" + probe.FailureReason);
             lines.Add("配置目录: " + SettingsStore.Directory);
             lines.Add("");
 
@@ -853,7 +900,7 @@ public partial class App : Application
             lines.Add("initial=" + AutoStart.IsRegistered);
             lines.Add("taskExists=" + AutoStart.TaskExists() + " runKey=" + AutoStart.RunKeyExists()
                 + " taskElevated=" + AutoStart.TaskRunsElevated());
-            lines.Add("ensure elevated -> " + AutoStart.EnsureElevatedAutostart(IsElevated, out string note) + " " + note);
+            lines.Add("ensure elevated -> " + AutoStart.EnsureElevatedAutostart(Core.TokenProbe.Probe().Usable, out string note) + " " + note);
 
             bool ok1 = AutoStart.Sync(true, out string m1, allowElevationPrompt: false);
             lines.Add($"enable ok={ok1} registered={AutoStart.IsRegistered} msg={m1}");

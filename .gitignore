@@ -2,6 +2,7 @@
 bin/
 obj/
 dist/
+dist  old/
 publish/
 *.user
 *.suo
@@ -19,12 +20,13 @@ tools/*
 *.pdb
 *.old
 *.tmp
+*.sys
+fix-result.txt
 
 # ç³»ç»Ÿ
 Thumbs.db
 desktop.ini
 
-# ·¢²¼²úÎï£¨ÓÉ dotnet publish Éú³É£©
+# å‘å¸ƒç›®å½•ï¼ˆdotnet publish ç”Ÿæˆï¼‰
 app/
 release/
-

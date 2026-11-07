@@ -15,6 +15,30 @@ public static class AutoStart
 
     public static string ExecutablePath => Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "CpuGlassMonitor.exe");
 
+    /// <summary>
+    /// 自启项应该指向的 exe。
+    /// 当前程序若坐在带低完整性标签的目录里（例如某个被沙箱化的工作区），
+    /// 计划任务就算 HighestAvailable 也会被系统压成低 IL，CPU/托盘全废。
+    /// 这时按优先级找一份「存在且不带低标签」的副本；程序搬过家也没关系，
+    /// 候选目录由 ImageLabel.CandidateDirectories 统一维护（支持 CPUGLASS_HOME 覆盖）。
+    /// </summary>
+    public static string PreferredExe
+    {
+        get
+        {
+            string exe = ExecutablePath;
+            if (!ImageLabel.IsLow(exe)) return exe;
+
+            foreach (string dir in ImageLabel.CandidateDirectories)
+            {
+                string candidate = Path.Combine(dir, Path.GetFileName(exe));
+                if (File.Exists(candidate) && !ImageLabel.IsLow(candidate)) return candidate;
+            }
+
+            return exe;
+        }
+    }
+
     /// <summary>当前是否真的注册了开机自启。</summary>
     public static bool IsRegistered => TaskExists() || RunKeyExists();
 
@@ -126,7 +150,9 @@ public static class AutoStart
         note = "";
         try
         {
-            string exe = ExecutablePath;
+            // 目标用 PreferredExe：当前 exe 带低标签时，任务应指向无标签目录里的副本。
+            // 否则这里会把"指向副本"误判成"指向旧路径"，又给改回带标签的 exe。
+            string exe = PreferredExe;
 
             if (TaskExists())
             {
@@ -142,8 +168,8 @@ public static class AutoStart
                 if (!TryCreateTask(out _)) return false;
 
                 note = oldShape
-                    ? $"开机自启：计划任务已升级（登录后延迟 {StartupDelaySeconds} 秒、电池上也启动）。"
-                    : "开机自启：计划任务原来指向旧路径，已更新为当前程序。";
+                    ? $"开机自启：计划任务已升级（登录后延迟 {StartupDelaySeconds} 秒、电池上也启动），目标={exe}。"
+                    : $"开机自启：计划任务目标已更新为 {exe}（当前 exe 带低完整性标签时指向无标签副本）。";
                 SettingsStore.Log(note);
                 return true;
             }
@@ -191,7 +217,7 @@ public static class AutoStart
                 sb.AppendLine($"任务 RunLevel={runLevel}");
                 sb.AppendLine($"任务 Command={command}");
                 sb.AppendLine($"任务 Arguments={args}");
-                sb.AppendLine("任务指向当前程序=" + (command.Contains(ExecutablePath, StringComparison.OrdinalIgnoreCase) ? "是" : "否 → " + ExecutablePath));
+                sb.AppendLine("任务指向自启目标=" + (command.Contains(PreferredExe, StringComparison.OrdinalIgnoreCase) ? "是" : "否 → " + PreferredExe));
             }
             else
             {
@@ -326,10 +352,10 @@ public static class AutoStart
     ///   DisallowStartIfOnBatteries=false —— 默认值是 true，用电池开机时任务根本不会启动（笔记本常踩）。
     ///   StartWhenAvailable —— 错过了触发点（睡眠/关机）也补跑。
     /// </summary>
-    private static string BuildTaskXml()
+    private static string BuildTaskXml(string? targetExe = null)
     {
         string user = $"{Environment.UserDomainName}\\{Environment.UserName}";
-        string exe = ExecutablePath;
+        string exe = targetExe ?? PreferredExe;
         return $@"<?xml version=""1.0"" encoding=""UTF-16""?>
 <Task version=""1.2"" xmlns=""http://schemas.microsoft.com/windows/2004/02/mit/task"">
   <RegistrationInfo>
@@ -390,14 +416,14 @@ public static class AutoStart
         }
     }
 
-    private static bool TryCreateTask(out string error)
+    private static bool TryCreateTask(out string error, string? targetExe = null)
     {
         error = "";
         string xmlPath = Path.Combine(Path.GetTempPath(), "CpuGlassMonitor-task.xml");
         try
         {
             // schtasks /XML 要求 UTF-16
-            File.WriteAllText(xmlPath, BuildTaskXml(), System.Text.Encoding.Unicode);
+            File.WriteAllText(xmlPath, BuildTaskXml(targetExe), System.Text.Encoding.Unicode);
 
             (int code, string output) = Run("schtasks.exe", new[]
             {
@@ -423,7 +449,7 @@ public static class AutoStart
         }
 
         // 回退：老的命令行方式（没有 Delay，但至少能自启）
-        string command = $"\"{ExecutablePath}\" --autostart";
+        string command = $"\"{targetExe ?? PreferredExe}\" --autostart";
         (int code2, string output2) = Run("schtasks.exe", new[]
         {
             "/Create", "/TN", TaskName, "/TR", command, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"
@@ -519,7 +545,7 @@ public static class AutoStart
         try
         {
             using Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RunKey)!;
-            key.SetValue(RunValue, $"\"{ExecutablePath}\" --autostart");
+            key.SetValue(RunValue, $"\"{PreferredExe}\" --autostart");
             return true;
         }
         catch (Exception ex)

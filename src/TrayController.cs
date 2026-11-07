@@ -22,6 +22,8 @@ public sealed class TrayController : IDisposable
     private int _taskbarCreatedMessage;
     private DispatcherTimer? _retry;
     private int _reattachLeft;
+    private static readonly HashSet<string> _promoteLogs = new();
+    private static bool _uipiWarningLogged;
 
     private Forms.ToolStripMenuItem _showItem = null!;
     private Forms.ToolStripMenuItem _settingsItem = null!;
@@ -176,6 +178,18 @@ public sealed class TrayController : IDisposable
                 SettingsStore.Log($"托盘图标已重新挂载（{reason}）icon={(hadIcon ? "有" : "空")} visible={_notifyIcon.Visible} 桌面={BootReady.ShellReady()}");
             }
 
+            // Visible=True 只代表 NotifyIcon 这个本地对象的状态，不代表系统收下了图标。
+            // 低完整性令牌发给 explorer（中 IL）的 Shell_NotifyIcon 会被 UIPI 直接丢掉，
+            // 表现就是「日志说图标在，托盘里却没有」——这才是自启没图标的根因，重挂多少次都没用。
+            var probe = Core.TokenProbe.Probe();
+            if (!probe.Usable && probe.IntegrityRid < Core.TokenProbe.IntegrityMedium && !_uipiWarningLogged)
+            {
+                _uipiWarningLogged = true;
+                SettingsStore.Log($"托盘图标可能不显示：完整性级别={probe.IntegrityName}，"
+                    + "UIPI 会拦截发给资源管理器的托盘通知；需要以完整管理员令牌重启（托盘菜单里有这一项）。"
+                    + " 诊断=" + probe.FailureReason);
+            }
+
             TryPromoteInTray();
         }
         catch (Exception ex)
@@ -259,7 +273,7 @@ public sealed class TrayController : IDisposable
 
             if (root == null)
             {
-                SettingsStore.Log("托盘常显：打不开 NotifyIconSettings（只读？）");
+                LogPromoteOnce("托盘常显：打不开 NotifyIconSettings（只读？）");
                 return;
             }
 
@@ -281,12 +295,20 @@ public sealed class TrayController : IDisposable
             }
 
             // 图标项还没被系统登记（刚启动时常见），下次重挂再试即可
-            if (!found) SettingsStore.Log("托盘常显：系统里还没有本程序的图标项，稍后重试");
+            if (!found) LogPromoteOnce("托盘常显：系统里还没有本程序的图标项，稍后重试");
         }
         catch (Exception ex)
         {
-            SettingsStore.Log("设置托盘图标常显失败: " + ex.Message);
+            LogPromoteOnce("设置托盘图标常显失败: " + ex.Message
+                           + "；令牌诊断=" + Core.TokenProbe.Probe().FailureReason);
         }
+    }
+
+    /// <summary>保活每 10 秒重挂一次，同一条失败原因只记一次，别把日志刷满。</summary>
+    private static void LogPromoteOnce(string message)
+    {
+        if (!_promoteLogs.Add(message)) return;
+        SettingsStore.Log(message + "（后续重挂不再重复记录）");
     }
 
     private Forms.ToolStripMenuItem CreateCheck(string text, Func<bool> getter, Action<bool> setter)

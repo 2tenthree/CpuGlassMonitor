@@ -20,8 +20,14 @@
 
 ## 运行
 
-从 [Releases](../../releases) 下载发布包直接运行，或按下面「构建 / 发布」自己编译出 `dist\`。
+从 [Releases](../../releases) 下载发布包直接运行，或按下面「构建 / 发布」自己编译出发布目录。
 需要 **.NET 10 桌面运行时**（Windows 10 1809+ / Windows 11）。
+
+本机实际安装目录是 **`D:\SoftWare\CpuGlassMonitor`**，桌面和开始菜单都有快捷方式。
+注意 `D:\bin\WorkSpace\DSH` 这一层被打了低完整性标签，从那下面运行会导致开机自启
+读不到 CPU 温度/频率、托盘没图标；项目里的旧 `dist\` 已改名为 `dist  old`，只留作历史产物。
+想换目录：设环境变量 `CPUGLASS_HOME` 指向新目录，把文件复制过去，再以管理员运行一次
+`fix-autostart.cmd`（可加 `-Target "新路径\CpuGlassMonitor.exe"`），计划任务和快捷方式会一起改。
 
 > **首次启动会弹一次 UAC**。CPU 温度 / 频率 / 核心电压必须走内核驱动（ring0），没有管理员权限时
 > 只能读到负载；此时面板底部会显示「受限模式」提示，同意 UAC 即可看到全部数据。
@@ -126,6 +132,144 @@ CpuGlassMonitor/
 ```
 
 ## 更新日志
+
+### v1.3.4
+
+**支持自定义安装目录，并把程序搬到 `D:\SoftWare\CpuGlassMonitor`**
+
+- 起因：`%LOCALAPPDATA%\Programs\...` 藏得太深不好找。实测 `D:\`、`D:\bin`、
+  `D:\bin\WorkSpace`、`桌面`、`文档` 都没有低完整性标签，坏标签只在
+  `D:\bin\WorkSpace\DSH` 这一层，所以完全可以放到 D 盘习惯的软件目录。
+- `ImageLabel.CandidateDirectories`：按 `CPUGLASS_HOME` → `D:\SoftWare\CpuGlassMonitor` →
+  旧用户级目录的顺序找确实放着 exe 的目录；`SafeDirectory`（诊断里的建议安装目录）与
+  `AutoStart.PreferredExe`（自启目标）都走这份列表，并复查候选 exe 的标签。
+  避免搬家之后从 `dist` 以管理员启动时又把任务改回旧副本。
+- `fix-autostart.cmd` / `.ps1` 改为参数化（`-Target`），以管理员运行一次即完成：
+  改计划任务 → 重建开始菜单 + 桌面快捷方式（勾「以管理员身份运行」）→ 结束旧实例 →
+  清理残留 ring0 驱动服务 → 立即触发任务 → 输出 UTF-8 验证报告 `fix-result.txt`。
+  报告带 `VERDICT`，含令牌、温度、托盘、引擎、驱动镜像路径五项判定。
+- 旧 `%LOCALAPPDATA%\Programs\CpuGlassMonitor` 保留为备份，确认新目录一切正常后可自行删除；
+  **不要从旧目录启动**，否则自启目标会被改回那里。
+
+### v1.3.3
+
+**让「改自启目标」这一步不再依赖用户记路径**
+
+v1.3.2 把文件标签写进了诊断，但复验时发现计划任务仍指向 `dist`：
+用户一直从 `dist` 以管理员启动，而 `EnsureTargetsCurrentExe` 判断「任务指向当前程序=是」，
+于是永远不会把任务改到无标签目录，下次开机又把低 IL 实例拉起来。
+
+- `AutoStart.PreferredExe`：当前 exe 带低完整性标签、且
+  `%LOCALAPPDATA%\Programs\CpuGlassMonitor` 下已有完整副本时，自启目标统一指向那份副本；
+  计划任务 XML、命令行回退、Run 键、诊断输出全部走这个目标。
+- `EnsureTargetsCurrentExe` 用 `PreferredExe` 比较，避免把「已指向副本」误判成旧路径又改回去。
+- 效果：**只要以管理员身份启动一次本程序（从哪个目录都行）**，就会自动把计划任务改到
+  无标签副本；低 IL 自启实例不会尝试改任务（没有权限）。
+- 附带 `ImageLabel.Describe()` 结果缓存，一次启动只跑一次 `icacls`。
+
+**实测验证（2026-11-07 18:52，管理员运行 `fix-autostart.cmd` 后）**
+
+计划任务 Action 已改为无标签副本，触发器仍是「登录后延迟 45 秒 / Interactive / Highest」。
+由任务本身拉起（`--autostart`）的实例日志：
+
+```
+完整性级别=高  令牌可用=True  exe 强制完整性标签=无
+可写 %APPDATA%=是  可写 HKCU=是  可写 HKLM\...\Services=是
+托盘图标已重新挂载 visible=True  已把托盘图标设为常显（IsPromoted=1）
+首帧读数 elevated=True cpuTemp=True temp=48.0°C clock=1778.11 frames=5
+```
+
+CPU 温度/频率恢复、托盘图标可见并常显，低完整性标签这个根因闭环。
+登录触发与手动触发任务共用同一个 Principal，仍建议下次真实登录后再确认一次。
+
+**已知残留**：刚切换目录的那次启动，旧的 `R0CpuGlassMonitor` 服务可能仍指向
+`dist\CpuGlassMonitor.sys`——旧实例持有驱动句柄时 `sc delete` 只是标记删除，LHM 会复用该服务。
+功能不受影响（文件存在、MSR 可读）；下次开机没有旧句柄，`DropStaleDriverService` 会真正删除并
+让 LHM 按当前目录重装。`fix-autostart.cmd` 已加入服务清理步骤，重跑一次即可立即收敛。
+
+### v1.3.2
+
+**开机自启仍读不到 CPU / 托盘没图标的真正根因：exe 被打了低完整性标签**
+
+v1.3.1 上线后开机复验仍然失败，日志出现了一个反常组合：
+
+```
+IsInRole(管理员)=True / 提权类型=Full（已提升） / 完整性级别=低
+可写 %APPDATA%=否   可写 HKCU=否   可写 HKLM\...\Services=否   可写 程序目录=是
+```
+
+`icacls` 给出了答案——`D:\bin\WorkSpace\DSH` 这一层被显式设了
+`Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)`，整个项目目录树继承，
+`dist\CpuGlassMonitor.exe` 上是 `(I)(NW)`。Windows 创建进程时，
+**进程完整性 = min(令牌 IL, 映像文件标签 IL)**，所以计划任务就算写着
+`HighestAvailable`、令牌也确实是 Full 已提升，进程照样被压成低 IL。
+这解释了此前所有"补丁"为什么无效：等桌面、驱动看门狗、托盘保活都在同一个低 IL 里重试。
+
+- 手动启动正常，是因为它走 UAC / AppInfo 提权路径，由系统服务用完整令牌创建进程；
+- 计划任务不经过 AppInfo，于是被文件标签压低；
+- v1.3.1 的"提权重启"也没用：从**已提升**令牌发起 `runas` 不会弹 UAC，
+  只是用同一个低 IL 令牌再启动一个带 `--elevated` 的自己（日志里的
+  `提权后令牌仍不完整` 就是这么来的）。
+
+**修复方式（部署层）**：把程序放到没有低完整性标签的普通目录 —— v1.3.2/1.3.3 用的是
+`%LOCALAPPDATA%\Programs\CpuGlassMonitor`，v1.3.4 起换到更好找的
+`D:\SoftWare\CpuGlassMonitor`（可用 `CPUGLASS_HOME` 覆盖）。程序以管理员身份启动一次后，
+`AutoStart.EnsureTargetsCurrentExe` 会自动把计划任务改指向新路径，之后开机自启
+直接拿到高 IL，不弹 UAC、温度和托盘都正常。若必须留在原目录，需要管理员去掉
+目录上的低完整性标签（低 IL 进程自己没有权限改 SACL）。
+
+**代码改动**：新增 `Core/ImageLabel.cs`（用 `icacls` 判定文件完整性标签），
+启动日志、`--diag`、`boot-diag.txt` 都会带上该标签与结论；检测到
+「Full 已提升令牌 + 低 IL + 低标签」时跳过无效的提权重启，直接写清根因和修法，
+不再产生误导性的 `--elevated` 副本。
+
+### v1.3.1
+
+> 更正：本版把「令牌残缺」当作根因，实际那只是症状；真正根因见 v1.3.2。
+> 本版的权限实测、驱动自愈、配置/托盘兜底仍然有效且必要。
+
+**定位到「开机自启读不到 CPU 参数 / 托盘没图标」的令牌层面症状**
+
+前几个版本一直在给症状打补丁（等桌面、驱动看门狗、托盘保活 5 分钟），但日志把根因摆出来了：
+自启进程拿到的是一个**残缺令牌**——
+
+```
+IsInRole(管理员)=True / 提权类型=Full（已提升） / 完整性级别=低
+可写 %APPDATA%=否   可写 HKCU=否   可写 HKLM\...\Services=否
+```
+
+程序只看 `IsInRole(Administrator)` 就以为已经提权，于是跳过了提权重启；实际上低完整性
+令牌做不了下面三件事，正好对应用户看到的全部症状：
+
+| 症状 | 直接原因 |
+| --- | --- |
+| CPU 温度 / 频率 / 电压全空 | 低 IL 调不动服务控制管理器（`sc start` 退出码 5 拒绝访问），ring0 驱动起不来，MSR 读不到 |
+| 托盘看不到图标 | 低 IL 发给 explorer（中 IL）的 `Shell_NotifyIcon` 被 UIPI 丢掉；`IsPromoted` 也写不进 HKCU |
+| 设置存不下、日志退到程序目录 | `%APPDATA%` 被拒 |
+
+手动启动一直正常，是因为它走 `runas` UAC 提权，拿到的是完整的高完整性令牌
+（日志：高 IL、四项写入全是「是」、ring0=open、cpuTemp=True）。之前所有重试补丁都在
+同一个残缺令牌下反复重试，权限没变，所以重载 10 次也救不回来。
+
+修复内容：
+
+- **权限判定改成实测**：`TokenProbe` 输出结构化结论（提权类型 / 完整性级别 / 四项实测
+  写权限 / 令牌是否可用 / 不可用原因），`App.IsElevated` 一律用这个结论。
+- **自启不再豁免提权**：令牌不完整时，走与「用户双击启动」完全相同的 UAC 提权重启路径
+  （带 `--elevated` 防循环）。计划任务本来就给完整令牌的机器上不会弹 UAC；只有令牌
+  确实残缺时才会多这一次提权。UAC 被取消则降级运行，并把原因写进日志。
+- **修掉驱动死锁**：`CpuGlassMonitor.sys` 是运行时从 LHM 资源释放出来的，重新发布或清理
+  目录后它会消失；服务注册项却还在，LHM 看到「服务已存在」就跳过安装（也不再释放 .sys），
+  `sc start` 又指向不存在的文件，于是每一轮重载都白跑。现在 `Open()` 前先把
+  `WinRing0x64.gz` 解压补回程序目录（LHM 在 gzip 流前面塞了 1 个 `0xFF` 前缀字节，
+  直接解压会失败）；`TryResetDriverService` 不再顺手删 .sys；`sc.exe` 的原始输出也不再被吞。
+- **降级也不丢东西**：`settings.json` 写不进 `%APPDATA%` 时改存程序目录，`Load` 两个位置都认；
+  托盘常显的失败日志按原因去重（原本每 10 秒刷一条）；低 IL 时明确记一条 UIPI 警告。
+- **诊断留证据**：令牌不可用的自启实例（不会启动驱动看门狗）也会写 `boot-diag.txt`，
+  报告里补上完整性级别和令牌判定原因。
+
+> 行为变化：在令牌异常的机器上，开机自启会像手动启动一样弹一次 UAC。设置里关掉
+> 「需要管理员权限」可以免弹窗，但那样本来就读不到 CPU 温度 / 频率 / 电压。
 
 ### v1.3.0
 
